@@ -1,10 +1,10 @@
 package com.ds2api.admin.dev;
 
+import com.ds2api.config.ConfigLoaderService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -13,7 +13,7 @@ import reactor.core.publisher.Mono;
 
 /**
  * Dev packet capture REST endpoints under /admin/dev.
- * Requires X-Admin-Key header matching DS2API_ADMIN_KEY env/config value.
+ * Requires X-Admin-Key header matching config.json's admin_key.
  */
 @RestController
 @RequestMapping("/admin/dev")
@@ -21,10 +21,8 @@ import reactor.core.publisher.Mono;
 public class DevCaptureController {
 
     private final PacketCaptureService captureService;
+    private final ConfigLoaderService configLoader;
     private final JsonNodeFactory json = JsonNodeFactory.instance;
-
-    @Value("${DS2API_ADMIN_KEY:}")
-    private String adminKey;
 
     @GetMapping("/captures")
     public Mono<ObjectNode> listCaptures(
@@ -93,6 +91,7 @@ public class DevCaptureController {
     }
 
     private void validateAdminKey(String providedKey) {
+        String adminKey = configLoader.getConfig().getAdminKey();
         if (adminKey == null || adminKey.isBlank() || !adminKey.equals(providedKey)) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid admin key");
         }

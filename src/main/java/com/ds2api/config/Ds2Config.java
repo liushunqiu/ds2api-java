@@ -45,6 +45,9 @@ public class Ds2Config {
     @JsonProperty("admin_key")
     private String adminKey = "admin";
 
+    @JsonProperty("dev")
+    private DevConfig dev = new DevConfig();
+
     // --- inner config classes ---
 
     @Data
@@ -92,5 +95,14 @@ public class Ds2Config {
     public static class ThinkingInjectionConfig {
         @JsonProperty("enabled") private boolean enabled = true;
         @JsonProperty("prompt") private String prompt = "";
+    }
+
+    @Data
+    public static class DevConfig {
+        @JsonProperty("packet_capture")
+        private boolean packetCapture = false;
+
+        @JsonProperty("packet_capture_limit")
+        private int packetCaptureLimit = 20;
     }
 }

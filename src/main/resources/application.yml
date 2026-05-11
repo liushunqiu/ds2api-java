@@ -32,4 +32,3 @@ ds2api:
     base-url: "https://chat.deepseek.com"
     token: "${DS2API_UPSTREAM_TOKEN:}"
 
-DS2API_ADMIN_KEY: "${DS2API_ADMIN_KEY:}"

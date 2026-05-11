@@ -16,6 +16,10 @@ import java.util.concurrent.atomic.AtomicReference;
  * Loads config.json at startup, watches for file changes, and hot-reloads.
  * The current config is exposed via getConfig() and is always valid
  * (falls back to defaults if the file is missing or malformed).
+ *
+ * Environment variable overrides:
+ *   DS2API_ADMIN_KEY  - overrides config.json's admin_key field
+ *   DS2API_CONFIG_PATH - external path to config.json
  */
 @Service
 public class ConfigLoaderService {
@@ -56,11 +60,13 @@ public class ConfigLoaderService {
     public boolean reload() {
         if (!Files.exists(configPath)) {
             log.warn("config.json not found at {}, using defaults", configPath);
+            applyEnvOverrides(configRef.get());
             return false;
         }
         try {
             String content = Files.readString(configPath);
             Ds2Config cfg = mapper.readValue(content, Ds2Config.class);
+            applyEnvOverrides(cfg);
             configRef.set(cfg);
             log.info("Config loaded from {} ({} keys, {} api_keys, {} accounts, {} aliases)",
                 configPath,
@@ -72,6 +78,17 @@ public class ConfigLoaderService {
         } catch (IOException e) {
             log.error("Failed to load config.json: {}", e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * Apply environment variable overrides after loading config.
+     * DS2API_ADMIN_KEY takes precedence over config.json's admin_key.
+     */
+    private void applyEnvOverrides(Ds2Config cfg) {
+        String adminKeyEnv = System.getenv("DS2API_ADMIN_KEY");
+        if (adminKeyEnv != null && !adminKeyEnv.isBlank()) {
+            cfg.setAdminKey(adminKeyEnv);
         }
     }
 
