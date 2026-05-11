@@ -1,0 +1,26 @@
+version: '3.8'
+services:
+  ds2api:
+    build: .
+    container_name: ds2api-java
+    ports:
+      - "${DS2API_HOST_PORT:-6011}:5001"
+    volumes:
+      - ./config.json:/data/config.json:rw
+    environment:
+      - DS2API_ADMIN_KEY=${DS2API_ADMIN_KEY:-change_me_strong_key}
+      - DS2API_CONFIG_PATH=/data/config.json
+      - DS2API_DEV_PACKET_CAPTURE=${DS2API_DEV_PACKET_CAPTURE:-false}
+      - DS2API_DEV_PACKET_CAPTURE_LIMIT=20
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5001/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

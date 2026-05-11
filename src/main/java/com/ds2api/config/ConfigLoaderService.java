@@ -30,7 +30,7 @@ public class ConfigLoaderService {
 
     public ConfigLoaderService(ObjectMapper mapper) {
         this.mapper = mapper;
-        String configFile = System.getProperty("ds2api.config", "config.json");
+        String configFile = resolveConfigPath();
         this.configPath = Paths.get(configFile).toAbsolutePath();
     }
 
@@ -113,5 +113,13 @@ public class ConfigLoaderService {
         watcherThread.setDaemon(true);
         watcherThread.setName("config-watcher");
         watcherThread.start();
+    }
+
+    private static String resolveConfigPath() {
+        String sysProp = System.getProperty("ds2api.config");
+        if (sysProp != null && !sysProp.isBlank()) return sysProp;
+        String envVar = System.getenv("DS2API_CONFIG_PATH");
+        if (envVar != null && !envVar.isBlank()) return envVar;
+        return "config.json";
     }
 }

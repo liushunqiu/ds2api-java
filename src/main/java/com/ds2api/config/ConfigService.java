@@ -38,7 +38,7 @@ public class ConfigService {
         this.configLoader = configLoader;
         this.mapper = mapper;
         this.eventPublisher = eventPublisher;
-        String configFile = System.getProperty("ds2api.config", "config.json");
+        String configFile = resolveConfigPath();
         this.configPath = Path.of(configFile).toAbsolutePath();
     }
 
@@ -108,6 +108,15 @@ public class ConfigService {
     }
 
     /** Copy staging fields into the live config object reference. */
+
+    private static String resolveConfigPath() {
+        String sysProp = System.getProperty("ds2api.config");
+        if (sysProp != null && !sysProp.isBlank()) return sysProp;
+        String envVar = System.getenv("DS2API_CONFIG_PATH");
+        if (envVar != null && !envVar.isBlank()) return envVar;
+        return "config.json";
+    }
+
     private void applyToLiveConfig(Ds2Config live, Ds2Config staging) {
         live.setKeys(staging.getKeys());
         live.setApiKeys(staging.getApiKeys());
