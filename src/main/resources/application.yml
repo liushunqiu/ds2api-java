@@ -1,0 +1,35 @@
+server:
+  port: ${DS2API_PORT:5001}
+  shutdown: graceful
+
+spring:
+  webflux:
+    hiddenmethod:
+      enabled: true
+  cache:
+    type: caffeine
+    caffeine:
+      spec: maximumSize=5000,expireAfterWrite=10m
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    com.ds2api: ${DS2API_LOG_LEVEL:INFO}
+    org.springframework.web: INFO
+
+ds2api:
+  upstream:
+    base-url: "https://chat.deepseek.com"
+    token: "${DS2API_UPSTREAM_TOKEN:}"
+
+DS2API_ADMIN_KEY: "${DS2API_ADMIN_KEY:}"

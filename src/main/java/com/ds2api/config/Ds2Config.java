@@ -1,0 +1,96 @@
+package com.ds2api.config;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.Data;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * 1:1 mapping of config.json. All JSON snake_case keys are mapped via @JsonProperty
+ * to Java camelCase fields, so Jackson deserializes the original config.json unchanged.
+ *
+ * This class is NOT a Spring @ConfigurationProperties bean; it is manually loaded
+ * by ConfigLoaderService from the config.json file at startup and on file change.
+ */
+@Data
+public class Ds2Config {
+
+    @JsonProperty("keys")
+    private List<ApiKey> keys = new ArrayList<>();
+
+    @JsonProperty("api_keys")
+    private List<ApiKey> apiKeys = new ArrayList<>();
+
+    @JsonProperty("accounts")
+    private List<Account> accounts = new ArrayList<>();
+
+    @JsonProperty("model_aliases")
+    private Map<String, String> modelAliases = new HashMap<>();
+
+    @JsonProperty("runtime")
+    private RuntimeConfig runtime = new RuntimeConfig();
+
+    @JsonProperty("auto_delete")
+    private AutoDeleteConfig autoDelete = new AutoDeleteConfig();
+
+    @JsonProperty("current_input_file")
+    private CurrentInputFileConfig currentInputFile = new CurrentInputFileConfig();
+
+    @JsonProperty("thinking_injection")
+    private ThinkingInjectionConfig thinkingInjection = new ThinkingInjectionConfig();
+
+    @JsonProperty("admin_key")
+    private String adminKey = "admin";
+
+    // --- inner config classes ---
+
+    @Data
+    public static class ApiKey {
+        @JsonProperty("key") private String key;
+        @JsonProperty("name") private String name;
+        @JsonProperty("remark") private String remark;
+    }
+
+    @Data
+    public static class Account {
+        @JsonProperty("email") private String email;
+        @JsonProperty("mobile") private String mobile;
+        @JsonProperty("password") private String password;
+        @JsonProperty("token") private String token;
+        @JsonProperty("name") private String name;
+        @JsonProperty("remark") private String remark;
+        @JsonProperty("proxy") private String proxy;
+    }
+
+    @Data
+    public static class RuntimeConfig {
+        @JsonProperty("account_max_inflight")
+        private int accountMaxInflight = 2;
+
+        @JsonProperty("account_max_queue")
+        private int accountMaxQueue = 0;
+
+        @JsonProperty("auto_refresh_token")
+        private boolean autoRefreshToken = true;
+    }
+
+    @Data
+    public static class AutoDeleteConfig {
+        @JsonProperty("mode") private String mode = "none"; // none / single / all
+    }
+
+    @Data
+    public static class CurrentInputFileConfig {
+        @JsonProperty("enabled") private boolean enabled = true;
+        @JsonProperty("threshold") private int threshold = 0;
+    }
+
+    @Data
+    public static class ThinkingInjectionConfig {
+        @JsonProperty("enabled") private boolean enabled = true;
+        @JsonProperty("prompt") private String prompt = "";
+    }
+}
