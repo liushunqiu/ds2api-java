@@ -1,0 +1,36 @@
+{
+  "keys": ["sk-your-api-key-here"],
+  "api_keys": [],
+  "accounts": [
+    {
+      "mobile": "13800138000",
+      "password": "your_password"
+    },
+    {
+      "email": "example@email.com",
+      "password": "your_password"
+    }
+  ],
+  "model_aliases": {},
+  "runtime": {
+    "account_max_inflight": 2,
+    "account_max_queue": 0,
+    "auto_refresh_token": true
+  },
+  "auto_delete": {
+    "mode": "none"
+  },
+  "current_input_file": {
+    "enabled": false,
+    "threshold": 15000
+  },
+  "thinking_injection": {
+    "enabled": true,
+    "prompt": ""
+  },
+  "admin_key": "your_admin_key",
+  "dev": {
+    "packet_capture": false,
+    "packet_capture_limit": 20
+  }
+}

@@ -4,3 +4,7 @@ target/
 .vscode/
 .DS_Store
 **/.DS_Store
+
+# === Sensitive configuration ===
+config.json
+.env

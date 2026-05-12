@@ -67,7 +67,17 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
                 switch (type) {
                     case "function_call", "tool_call" -> {
                         String name = node.path("name").asText("");
-                        String args = node.path("arguments").asText("{}");
+                        // Support both "arguments" and "input" fields (like Go version)
+                        JsonNode argsNode = node.get("arguments");
+                        if (argsNode == null) argsNode = node.get("input");
+                        String args;
+                        if (argsNode == null) {
+                            args = "{}";
+                        } else if (argsNode.isTextual()) {
+                            args = argsNode.asText("{}");
+                        } else {
+                            args = argsNode.toString();
+                        }
                         String callId = node.path("call_id").asText(node.path("id").asText(""));
                         if (name.isBlank()) continue;
                         ObjectNode toolCall = mapper.createObjectNode();
