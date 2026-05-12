@@ -163,11 +163,28 @@ public class OpenAiController {
                     resolvedModel);
                 if (resolved.tools() != null && resolved.tools().isArray()) {
                     for (JsonNode tool : resolved.tools()) {
-                        String toolName = tool.path("function").path("name").asText(tool.path("name").asText("?"));
-                        JsonNode params = tool.path("function").path("parameters").path("properties");
+                        String toolName = tool.path("name").asText("");
+                        if (toolName.isEmpty()) toolName = tool.path("function").path("name").asText("?");
+                        JsonNode schema = null;
+                        for (String key : new String[]{"parameters", "input_schema", "inputSchema", "schema"}) {
+                            JsonNode n = tool.path(key);
+                            if (!n.isMissingNode() && !n.isNull()) { schema = n; break; }
+                        }
+                        if (schema == null) {
+                            JsonNode func = tool.path("function");
+                            if (!func.isMissingNode()) {
+                                for (String key : new String[]{"parameters", "input_schema", "inputSchema", "schema"}) {
+                                    JsonNode n = func.path(key);
+                                    if (!n.isMissingNode() && !n.isNull()) { schema = n; break; }
+                                }
+                            }
+                        }
                         List<String> paramNames = new ArrayList<>();
-                        if (params.isObject()) {
-                            params.fieldNames().forEachRemaining(paramNames::add);
+                        if (schema != null) {
+                            JsonNode props = schema.path("properties");
+                            if (props.isObject()) {
+                                props.fieldNames().forEachRemaining(paramNames::add);
+                            }
                         }
                         log.info("[{}]   tool defined: {} params={}", respId, toolName, paramNames);
                     }

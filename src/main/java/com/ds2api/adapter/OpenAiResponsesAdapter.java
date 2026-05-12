@@ -456,19 +456,17 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
     /**
      * Build parameter name mapping per tool from the tool schema.
      * Maps common aliases to actual parameter names.
-     * e.g., for exec_command: {"command" -> "cmd", "cmd" -> "cmd"}
      */
     private Map<String, Map<String, String>> buildToolParamNameMap(JsonNode tools) {
         Map<String, Map<String, String>> result = new HashMap<>();
         if (tools == null || !tools.isArray()) return result;
 
         for (JsonNode tool : tools) {
-            String name = tool.path("function").path("name").asText("");
-            if (name.isEmpty()) name = tool.path("name").asText("");
+            String name = extractToolName(tool);
             if (name.isEmpty()) continue;
 
-            JsonNode props = tool.path("function").path("parameters").path("properties");
-            if (!props.isObject()) continue;
+            JsonNode props = extractToolProperties(tool);
+            if (props == null || !props.isObject()) continue;
 
             Map<String, String> paramMap = new HashMap<>();
             List<String> actualNames = new ArrayList<>();
@@ -515,8 +513,8 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
 
             if (!paramMap.isEmpty()) {
                 result.put(name, paramMap);
-                // Also store with lowercase tool name for lookup
                 result.put(name.toLowerCase(), paramMap);
+                log.info("[Responses] Built param map for tool '{}': {}", name, paramMap);
             }
         }
         return result;
@@ -531,6 +529,8 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
 
         Map<String, String> paramMap = toolParamNameMap.get(toolName);
         if (paramMap == null) paramMap = toolParamNameMap.get(toolName.toLowerCase());
+        log.info("[Responses] fixParameterNames: toolName='{}', paramMap={}, argsJson={}", toolName, paramMap,
+            argsJson.length() > 200 ? argsJson.substring(0, 200) + "..." : argsJson);
         if (paramMap == null || paramMap.isEmpty()) return argsJson;
 
         try {
@@ -547,16 +547,57 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
                 if (mapped != null && !mapped.equals(paramName)) {
                     fixed.set(mapped, entry.getValue());
                     changed = true;
-                    log.info("[Responses]   Param remapped: '{}' -> '{}' for tool '{}'", paramName, mapped, toolName);
+                    log.info("[Responses]   Param REMAPPED: '{}' -> '{}' for tool '{}'", paramName, mapped, toolName);
                 } else {
                     fixed.set(paramName, entry.getValue());
+                    if (mapped == null) {
+                        log.info("[Responses]   Param NO MAPPING: '{}' for tool '{}' (available: {})", paramName, toolName, paramMap.keySet());
+                    }
                 }
             }
-            return changed ? mapper.writeValueAsString(fixed) : argsJson;
+            String result = changed ? mapper.writeValueAsString(fixed) : argsJson;
+            log.info("[Responses] fixParameterNames result: {}", result.length() > 200 ? result.substring(0, 200) + "..." : result);
+            return result;
         } catch (Exception e) {
             log.warn("[Responses] Failed to fix parameter names: {}", e.getMessage());
             return argsJson;
         }
+    }
+
+    /**
+     * Extract tool name from various Codex/OpenAI tool formats.
+     */
+    private String extractToolName(JsonNode tool) {
+        String name = tool.path("name").asText("").trim();
+        if (!name.isEmpty()) return name;
+        name = tool.path("function").path("name").asText("").trim();
+        return name;
+    }
+
+    /**
+     * Extract tool properties schema from various formats.
+     */
+    private JsonNode extractToolProperties(JsonNode tool) {
+        JsonNode schema = extractToolSchemaNode(tool);
+        if (schema == null) return null;
+        JsonNode props = schema.path("properties");
+        if (!props.isMissingNode() && props.isObject()) return props;
+        return null;
+    }
+
+    private JsonNode extractToolSchemaNode(JsonNode tool) {
+        for (String key : new String[]{"parameters", "input_schema", "inputSchema", "schema"}) {
+            JsonNode node = tool.path(key);
+            if (!node.isMissingNode() && !node.isNull()) return node;
+        }
+        JsonNode func = tool.path("function");
+        if (!func.isMissingNode()) {
+            for (String key : new String[]{"parameters", "input_schema", "inputSchema", "schema"}) {
+                JsonNode node = func.path(key);
+                if (!node.isMissingNode() && !node.isNull()) return node;
+            }
+        }
+        return null;
     }
 
     /**
@@ -571,10 +612,7 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
         List<String> originalNames = new ArrayList<>();
         if (tools == null || !tools.isArray()) return map;
         for (JsonNode tool : tools) {
-            String name = tool.path("function").path("name").asText("");
-            if (name.isEmpty()) {
-                name = tool.path("name").asText("");
-            }
+            String name = extractToolName(tool);
             if (!name.isEmpty()) {
                 map.put(name.toLowerCase(), name);
                 originalNames.add(name);

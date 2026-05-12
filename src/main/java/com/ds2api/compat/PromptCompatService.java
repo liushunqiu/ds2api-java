@@ -80,17 +80,17 @@ public class PromptCompatService {
         List<String> toolNames = new ArrayList<>();
 
         for (JsonNode tool : tools) {
-            JsonNode func = tool.path("function");
-            String name = func.path("name").asText("");
+            // Extract tool name - check multiple locations (like Go's ExtractToolMeta)
+            String name = extractToolName(tool);
             if (name.isBlank()) continue;
-            String desc = func.path("description").asText("No description available");
-            JsonNode params = func.path("parameters");
+            String desc = extractToolDesc(tool);
+            JsonNode params = extractToolSchema(tool);
             toolNames.add(name);
 
             toolSchemas.append("Tool: ").append(name).append("\n");
             toolSchemas.append("Description: ").append(desc).append("\n");
             toolSchemas.append("Parameters: ");
-            if (!params.isMissingNode() && !params.isNull()) {
+            if (params != null && !params.isMissingNode() && !params.isNull()) {
                 try {
                     toolSchemas.append(mapper.writeValueAsString(params));
                 } catch (Exception e) {
@@ -122,6 +122,51 @@ public class PromptCompatService {
         }
         log.debug("[Compat] Tool definitions injected");
         return messages;
+    }
+
+    /**
+     * Extract tool name from various Codex/OpenAI tool formats.
+     * Checks: tool.name, tool.function.name
+     */
+    private String extractToolName(JsonNode tool) {
+        String name = tool.path("name").asText("").trim();
+        if (!name.isEmpty()) return name;
+        name = tool.path("function").path("name").asText("").trim();
+        return name;
+    }
+
+    /**
+     * Extract tool description from various formats.
+     * Checks: tool.description, tool.function.description
+     */
+    private String extractToolDesc(JsonNode tool) {
+        String desc = tool.path("description").asText("").trim();
+        if (!desc.isEmpty()) return desc;
+        desc = tool.path("function").path("description").asText("").trim();
+        if (!desc.isEmpty()) return desc;
+        return "No description available";
+    }
+
+    /**
+     * Extract tool parameter schema from various formats.
+     * Checks: tool.parameters, tool.input_schema, tool.inputSchema, tool.schema,
+     *         tool.function.parameters, tool.function.input_schema, etc.
+     */
+    private JsonNode extractToolSchema(JsonNode tool) {
+        // Check top-level first
+        for (String key : new String[]{"parameters", "input_schema", "inputSchema", "schema"}) {
+            JsonNode node = tool.path(key);
+            if (!node.isMissingNode() && !node.isNull()) return node;
+        }
+        // Check function wrapper
+        JsonNode func = tool.path("function");
+        if (!func.isMissingNode()) {
+            for (String key : new String[]{"parameters", "input_schema", "inputSchema", "schema"}) {
+                JsonNode node = func.path(key);
+                if (!node.isMissingNode() && !node.isNull()) return node;
+            }
+        }
+        return null;
     }
 
     private String buildToolCallInstructions(List<String> toolNames) {

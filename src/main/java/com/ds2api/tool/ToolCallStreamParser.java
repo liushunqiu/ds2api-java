@@ -177,7 +177,145 @@ public class ToolCallStreamParser {
     }
 
     private void parseInvokeBodyIncremental(String body, String callId, int toolIndex, List<InternalStreamEvent> events) {
-        // Collect all parameters
+        // Use proper XML parsing for nested structures
+        java.util.Map<String, Object> params = parseParametersAsStructured(body);
+
+        // Build JSON arguments and emit as delta
+        if (!params.isEmpty()) {
+            String argsJson = buildStructuredJson(params);
+            log.info("[ToolCallStreamParser] ToolCallDelta: {} index={} args={}", callId, toolIndex,
+                argsJson.length() > 200 ? argsJson.substring(0, 200) + "..." : argsJson);
+            events.add(new InternalStreamEvent.ToolCallDelta(callId, toolIndex, argsJson));
+        }
+    }
+
+    /**
+     * Parse DSML parameter XML into structured map.
+     * Handles nested <parameter> elements recursively.
+     * Returns Map<String, Object> where values can be String, Map, or List.
+     */
+    private java.util.Map<String, Object> parseParametersAsStructured(String body) {
+        java.util.Map<String, Object> result = new java.util.LinkedHashMap<>();
+        // Wrap in a root element for XML parsing
+        String xml = "<root>" + body + "</root>";
+        try {
+            javax.xml.parsers.DocumentBuilderFactory factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
+            factory.setNamespaceAware(false);
+            factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+            javax.xml.parsers.DocumentBuilder builder = factory.newDocumentBuilder();
+            org.w3c.dom.Document doc = builder.parse(new org.xml.sax.InputSource(new java.io.StringReader(xml)));
+            org.w3c.dom.Element root = doc.getDocumentElement();
+            parseChildParameters(root, result);
+        } catch (Exception e) {
+            log.warn("[ToolCallStreamParser] XML parse failed, falling back to regex: {}", e.getMessage());
+            // Fallback to regex-based parsing
+            java.util.Map<String, Object> fallback = new java.util.LinkedHashMap<>();
+            fallback.putAll(parseParametersAsFlatMap(body));
+            return fallback;
+        }
+        return result;
+    }
+
+    private void parseChildParameters(org.w3c.dom.Element parent, java.util.Map<String, Object> result) {
+        org.w3c.dom.NodeList children = parent.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            org.w3c.dom.Node node = children.item(i);
+            if (!(node instanceof org.w3c.dom.Element elem)) continue;
+            if (!"parameter".equalsIgnoreCase(elem.getTagName()) && !"item".equalsIgnoreCase(elem.getTagName())) continue;
+
+            String name = elem.getAttribute("name");
+            if (name.isEmpty() && "item".equalsIgnoreCase(elem.getTagName())) {
+                name = "item";
+            }
+            if (name.isEmpty()) continue;
+
+            // Check if this parameter has nested <parameter> children
+            boolean hasNestedParams = false;
+            org.w3c.dom.NodeList elemChildren = elem.getChildNodes();
+            for (int j = 0; j < elemChildren.getLength(); j++) {
+                org.w3c.dom.Node child = elemChildren.item(j);
+                if (child instanceof org.w3c.dom.Element childElem) {
+                    if ("parameter".equalsIgnoreCase(childElem.getTagName()) || "item".equalsIgnoreCase(childElem.getTagName())) {
+                        hasNestedParams = true;
+                        break;
+                    }
+                }
+            }
+
+            if (hasNestedParams) {
+                // Check if children are all "item" elements (array)
+                boolean allItems = true;
+                java.util.List<Object> items = new java.util.ArrayList<>();
+                java.util.Map<String, Object> nested = new java.util.LinkedHashMap<>();
+
+                for (int j = 0; j < elemChildren.getLength(); j++) {
+                    org.w3c.dom.Node child = elemChildren.item(j);
+                    if (!(child instanceof org.w3c.dom.Element childElem)) continue;
+                    if (!"parameter".equalsIgnoreCase(childElem.getTagName()) && !"item".equalsIgnoreCase(childElem.getTagName())) continue;
+
+                    String childName = childElem.getAttribute("name");
+                    if (childName.isEmpty() && "item".equalsIgnoreCase(childElem.getTagName())) {
+                        childName = "item";
+                    }
+
+                    if ("item".equalsIgnoreCase(childElem.getTagName()) || "item".equals(childName)) {
+                        // This is an array item
+                        java.util.Map<String, Object> itemMap = new java.util.LinkedHashMap<>();
+                        parseChildParameters(childElem, itemMap);
+                        items.add(itemMap.isEmpty() ? getElementText(childElem) : itemMap);
+                    } else {
+                        allItems = false;
+                        java.util.Map<String, Object> childMap = new java.util.LinkedHashMap<>();
+                        parseChildParameters(childElem, childMap);
+                        if (childMap.isEmpty()) {
+                            nested.put(childName, getElementText(childElem));
+                        } else {
+                            nested.put(childName, childMap);
+                        }
+                    }
+                }
+
+                if (!items.isEmpty()) {
+                    // Array: use the parent name as key
+                    if (result.containsKey(name)) {
+                        // Merge with existing
+                        Object existing = result.get(name);
+                        if (existing instanceof java.util.List<?> existingList) {
+                            java.util.List<Object> merged = new java.util.ArrayList<>(existingList);
+                            merged.addAll(items);
+                            result.put(name, merged);
+                        }
+                    } else {
+                        result.put(name, items);
+                    }
+                } else if (!nested.isEmpty()) {
+                    result.put(name, nested);
+                }
+            } else {
+                // Leaf node - extract text content
+                String text = getElementText(elem);
+                result.put(name, stripCDATA(text));
+            }
+        }
+    }
+
+    private String getElementText(org.w3c.dom.Element elem) {
+        StringBuilder sb = new StringBuilder();
+        org.w3c.dom.NodeList children = elem.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            org.w3c.dom.Node child = children.item(i);
+            if (child.getNodeType() == org.w3c.dom.Node.TEXT_NODE || child.getNodeType() == org.w3c.dom.Node.CDATA_SECTION_NODE) {
+                sb.append(child.getTextContent());
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    /**
+     * Fallback: parse parameters as flat map using regex (for non-nested cases).
+     */
+    private java.util.Map<String, String> parseParametersAsFlatMap(String body) {
         java.util.Map<String, String> params = new java.util.LinkedHashMap<>();
         Matcher paramMatcher = PARAM_START.matcher(body);
         int pos = 0;
@@ -188,25 +326,51 @@ public class ToolCallStreamParser {
             if (paramEndMatcher.find(paramValueStart)) {
                 String value = stripCDATA(body.substring(paramValueStart, paramEndMatcher.start()));
                 params.put(paramName, value);
-                log.debug("[ToolCallStreamParser] Found param: {} = {}", paramName,
-                    value.length() > 50 ? value.substring(0, 50) + "..." : value);
                 pos = paramEndMatcher.end();
             } else {
                 String value = stripCDATA(body.substring(paramValueStart));
                 params.put(paramName, value);
-                log.debug("[ToolCallStreamParser] Found param (no end): {} = {}", paramName,
-                    value.length() > 50 ? value.substring(0, 50) + "..." : value);
                 pos = body.length();
             }
         }
+        return params;
+    }
 
-        // Build JSON arguments with proper type inference and emit as delta
-        if (!params.isEmpty()) {
-            String argsJson = buildArgumentsJsonFromMapTyped(params);
-            log.debug("[ToolCallStreamParser] ToolCallDelta: {} index={} args={}", callId, toolIndex, 
-                argsJson.length() > 100 ? argsJson.substring(0, 100) + "..." : argsJson);
-            events.add(new InternalStreamEvent.ToolCallDelta(callId, toolIndex, argsJson));
+    /**
+     * Build JSON from structured map (supports nested objects and arrays).
+     * Auto-parses JSON string values into structured objects.
+     */
+    private String buildStructuredJson(java.util.Map<String, Object> params) {
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+            // Pre-process: parse JSON string values into structured objects
+            java.util.Map<String, Object> processed = new java.util.LinkedHashMap<>();
+            for (var entry : params.entrySet()) {
+                processed.put(entry.getKey(), unwrapJsonValue(entry.getValue()));
+            }
+            return om.writeValueAsString(processed);
+        } catch (Exception e) {
+            log.warn("[ToolCallStreamParser] Failed to build structured JSON: {}", e.getMessage());
+            return "{}";
         }
+    }
+
+    /**
+     * If a value is a JSON string (starts with { or [), parse it into a structured object.
+     */
+    private Object unwrapJsonValue(Object value) {
+        if (value instanceof String str) {
+            String trimmed = str.trim();
+            if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+                try {
+                    com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+                    return om.readValue(trimmed, Object.class);
+                } catch (Exception e) {
+                    // Not valid JSON, keep as string
+                }
+            }
+        }
+        return value;
     }
 
     private String buildArgumentsJson(String body) {
