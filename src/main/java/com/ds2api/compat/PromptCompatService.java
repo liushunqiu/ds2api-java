@@ -193,6 +193,7 @@ public class PromptCompatService {
             10) If you call a tool, the first non-whitespace characters of that tool block must be exactly <|DSML|tool_calls>.
             11) Never omit the opening <|DSML|tool_calls> tag, even if you already plan to close with </|DSML|tool_calls>.
             12) Compatibility note: the runtime also accepts the legacy XML tags <tool_calls> / <invoke> / <parameter>, but prefer the DSML-prefixed form above.
+            13) CRITICAL for file writing tools (write_stdin, write_file, etc.): The parameter value must contain ONLY the raw file content. Do NOT wrap content in shell commands like heredoc (<< 'EOF' ... EOF), cat, echo, or any other shell syntax. Just provide the pure content directly.
 
             PARAMETER SHAPES:
             - string => <|DSML|parameter name="x"><![CDATA[value]]></|DSML|parameter>

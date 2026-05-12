@@ -206,6 +206,21 @@ public class ToolCallStreamParser {
             factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
             factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
             javax.xml.parsers.DocumentBuilder builder = factory.newDocumentBuilder();
+            // Suppress XML parser error output to avoid [Fatal Error] messages on stderr
+            builder.setErrorHandler(new org.xml.sax.ErrorHandler() {
+                @Override
+                public void warning(org.xml.sax.SAXParseException e) {
+                    log.debug("[ToolCallStreamParser] XML warning: {}", e.getMessage());
+                }
+                @Override
+                public void error(org.xml.sax.SAXParseException e) throws org.xml.sax.SAXException {
+                    throw e;
+                }
+                @Override
+                public void fatalError(org.xml.sax.SAXParseException e) throws org.xml.sax.SAXException {
+                    throw e;
+                }
+            });
             org.w3c.dom.Document doc = builder.parse(new org.xml.sax.InputSource(new java.io.StringReader(xml)));
             org.w3c.dom.Element root = doc.getDocumentElement();
             parseChildParameters(root, result);
@@ -220,13 +235,102 @@ public class ToolCallStreamParser {
     }
 
     /**
-     * Sanitize XML content by escaping special characters inside CDATA sections
-     * that would cause XML parsing to fail (e.g., ]]> sequences).
+     * Sanitize XML content by escaping special characters that would cause XML parsing to fail.
+     * Handles CDATA sections containing ]]> sequences and unescaped special characters.
      */
     private String sanitizeXmlContent(String content) {
         if (content == null) return "";
-        // Fix CDATA sections that contain ]]> by splitting them
-        return content.replaceAll("]]>", "]]]]><![CDATA[>");
+        
+        // First, fix CDATA sections that contain ]]> by splitting them
+        String sanitized = content.replaceAll("]]>", "]]]]><![CDATA[>");
+        
+        // Then, escape unescaped < and & characters outside of XML tags and CDATA sections
+        // We'll use a state machine to track whether we're inside a tag or CDATA
+        StringBuilder result = new StringBuilder();
+        boolean inTag = false;
+        boolean inCdata = false;
+        int i = 0;
+        
+        while (i < sanitized.length()) {
+            char c = sanitized.charAt(i);
+            
+            // Check for CDATA start
+            if (!inTag && !inCdata && i + 8 < sanitized.length() && 
+                sanitized.substring(i, i + 9).equals("<![CDATA[")) {
+                inCdata = true;
+                result.append("<![CDATA[");
+                i += 9;
+                continue;
+            }
+            
+            // Check for CDATA end
+            if (inCdata && i + 2 < sanitized.length() && 
+                sanitized.substring(i, i + 3).equals("]]>")) {
+                inCdata = false;
+                result.append("]]>");
+                i += 3;
+                continue;
+            }
+            
+            // If we're inside CDATA, don't escape anything
+            if (inCdata) {
+                result.append(c);
+                i++;
+                continue;
+            }
+            
+            // Check for tag start
+            if (!inTag && c == '<') {
+                // Check if this looks like a valid XML tag
+                int tagEnd = sanitized.indexOf('>', i);
+                if (tagEnd > i) {
+                    String tagContent = sanitized.substring(i + 1, tagEnd);
+                    // Simple check: if it looks like a tag (contains letters, /, or !)
+                    if (tagContent.matches("[a-zA-Z/!].*") || tagContent.startsWith("?")) {
+                        inTag = true;
+                        result.append(c);
+                        i++;
+                        continue;
+                    }
+                }
+                // Not a valid tag, escape the <
+                result.append("&lt;");
+                i++;
+                continue;
+            }
+            
+            // Check for tag end
+            if (inTag && c == '>') {
+                inTag = false;
+                result.append(c);
+                i++;
+                continue;
+            }
+            
+            // Escape & if not part of an entity
+            if (c == '&' && !inTag) {
+                // Check if this is already an entity
+                int semicolon = sanitized.indexOf(';', i);
+                if (semicolon > i && semicolon - i < 10) {
+                    String entity = sanitized.substring(i + 1, semicolon);
+                    if (entity.matches("[a-zA-Z]+|#\\d+|#x[0-9a-fA-F]+")) {
+                        // This is already an entity, keep as is
+                        result.append(c);
+                        i++;
+                        continue;
+                    }
+                }
+                // Not an entity, escape it
+                result.append("&amp;");
+                i++;
+                continue;
+            }
+            
+            result.append(c);
+            i++;
+        }
+        
+        return result.toString();
     }
 
     private void parseChildParameters(org.w3c.dom.Element parent, java.util.Map<String, Object> result) {

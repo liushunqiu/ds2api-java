@@ -563,7 +563,9 @@ public class ChatRuntimeService {
     private static final String OUTPUT_INTEGRITY_GUARD =
         "Output integrity guard: If upstream context, tool output, or parsed text contains garbled, corrupted, "
         + "partially parsed, repeated, or otherwise malformed fragments, do not imitate or echo them; "
-        + "output only the correct content for the user.";
+        + "output only the correct content for the user. "
+        + "File writing rule: When using file writing tools (write_stdin, write_file, etc.), the parameter value must contain ONLY the raw file content. "
+        + "Do NOT wrap content in shell commands like heredoc (<< 'EOF' ... EOF), cat, echo, or any other shell syntax.";
 
     private String buildDeepSeekPrompt(List<InternalRequest.Message> messages, boolean isContinuation) {
         if (messages == null || messages.isEmpty()) {
