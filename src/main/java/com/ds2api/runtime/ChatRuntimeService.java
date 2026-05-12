@@ -498,15 +498,49 @@ public class ChatRuntimeService {
 
     /**
      * Extract only new messages for session continuation.
-     * When client sends full history, we only need the latest user message
+     * When client sends full history, we only need the latest messages
      * since DeepSeek already has the previous history via parent_message_id.
+     *
+     * Handles two scenarios:
+     * 1. Normal conversation: extract from last user message
+     * 2. Tool call result: extract assistant(tool_calls) + tool messages
      */
     private List<InternalRequest.Message> extractNewMessages(List<InternalRequest.Message> messages) {
         if (messages == null || messages.isEmpty()) {
             return List.of();
         }
 
-        // Find the last user message index
+        // Check if last message is a tool result (tool call scenario)
+        InternalRequest.Message lastMsg = messages.get(messages.size() - 1);
+        if ("tool".equals(lastMsg.role())) {
+            // Find the assistant message with tool_calls before this tool message
+            int assistantIdx = -1;
+            for (int i = messages.size() - 2; i >= 0; i--) {
+                InternalRequest.Message msg = messages.get(i);
+                if ("assistant".equals(msg.role())) {
+                    // Check if this assistant message contains tool_calls
+                    if (msg.content() != null && msg.content().contains("<|DSML|tool_calls>")) {
+                        assistantIdx = i;
+                        break;
+                    }
+                }
+            }
+            // Return from assistant message onwards (assistant + tool messages)
+            if (assistantIdx >= 0) {
+                return messages.subList(assistantIdx, messages.size());
+            }
+            // Fallback: return tool message only
+            return List.of(lastMsg);
+        }
+
+        // Check if last message is assistant with tool_calls (no tool result yet)
+        if ("assistant".equals(lastMsg.role()) && lastMsg.content() != null 
+            && lastMsg.content().contains("<|DSML|tool_calls>")) {
+            // This is a tool_calls response, return it as-is
+            return List.of(lastMsg);
+        }
+
+        // Normal conversation: find the last user message index
         int lastUserIdx = -1;
         for (int i = messages.size() - 1; i >= 0; i--) {
             if ("user".equals(messages.get(i).role())) {
@@ -534,14 +568,31 @@ public class ChatRuntimeService {
             return "";
         }
 
-        // In continuation mode, only send raw message content without DeepSeek formatting
-        // because DeepSeek already has the formatted prompt via session history
+        // In continuation mode, format messages with proper DeepSeek tags
+        // because we need to send tool results in the correct format
         if (isContinuation) {
             StringBuilder sb = new StringBuilder();
             for (InternalRequest.Message msg : messages) {
-                if (msg.content() != null && !msg.content().isBlank()) {
-                    sb.append(msg.content());
+                String content = msg.content() != null ? msg.content() : "";
+                if (content.isBlank()) continue;
+                
+                switch (msg.role()) {
+                    case "tool":
+                        sb.append("<｜Tool｜>").append(content).append("<｜end▁of▁toolresults｜>");
+                        break;
+                    case "assistant":
+                        sb.append("<｜Assistant｜>").append(content).append("<｜end▁of▁sentence｜>");
+                        break;
+                    case "user":
+                        sb.append("<｜User｜>").append(content);
+                        break;
+                    default:
+                        sb.append(content);
                 }
+            }
+            // If last message is not assistant, add assistant prompt
+            if (!messages.isEmpty() && !"assistant".equals(messages.get(messages.size() - 1).role())) {
+                sb.append("<｜Assistant｜>");
             }
             return sb.toString();
         }
