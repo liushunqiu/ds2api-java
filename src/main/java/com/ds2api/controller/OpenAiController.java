@@ -138,6 +138,9 @@ public class OpenAiController {
         log.debug("Session_id from header for responses: '{}'", clientSessionId);
         final String sessionIdFromHeader = clientSessionId;
 
+        log.info("[{}] >>> Raw request from Codex: {}", respId,
+            body.toString().length() > 2000 ? body.toString().substring(0, 2000) + "..." : body.toString());
+
         return responsesAdapter.normalizeRequest(body)
             .map(req -> {
                 if (sessionIdFromHeader != null && !sessionIdFromHeader.isBlank()) {
@@ -153,6 +156,31 @@ public class OpenAiController {
                 List<InternalStreamEvent> buffer = Collections.synchronizedList(new ArrayList<>());
 
                 AuthInfo authInfo = ApiAuthFilter.getAuthInfo(exchange);
+
+                log.info("[{}] Normalized messages count={}, tools={}, model={}", respId,
+                    resolved.messages() != null ? resolved.messages().size() : 0,
+                    resolved.tools() != null && !resolved.tools().isNull() ? resolved.tools().size() : 0,
+                    resolvedModel);
+                if (resolved.tools() != null && resolved.tools().isArray()) {
+                    for (JsonNode tool : resolved.tools()) {
+                        String toolName = tool.path("function").path("name").asText(tool.path("name").asText("?"));
+                        JsonNode params = tool.path("function").path("parameters").path("properties");
+                        List<String> paramNames = new ArrayList<>();
+                        if (params.isObject()) {
+                            params.fieldNames().forEachRemaining(paramNames::add);
+                        }
+                        log.info("[{}]   tool defined: {} params={}", respId, toolName, paramNames);
+                    }
+                }
+                if (resolved.messages() != null) {
+                    for (int i = 0; i < resolved.messages().size(); i++) {
+                        var msg = resolved.messages().get(i);
+                        String preview = msg.content() != null
+                            ? (msg.content().length() > 300 ? msg.content().substring(0, 300) + "..." : msg.content())
+                            : "null";
+                        log.info("[{}]   msg[{}] role={} content={}", respId, i, msg.role(), preview);
+                    }
+                }
 
                 Flux<InternalStreamEvent> stream = runtime.execute(resolved, authInfo)
                     .doOnNext(event -> {

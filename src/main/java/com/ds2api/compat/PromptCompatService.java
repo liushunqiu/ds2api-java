@@ -104,6 +104,8 @@ public class PromptCompatService {
 
         String toolCallInstructions = buildToolCallInstructions(toolNames);
         String toolBlock = "\n\nYou have access to these tools:\n\n"
+            + "CRITICAL: You MUST use EXACTLY the tool names listed below. Do NOT invent, rename, or substitute tool names.\n"
+            + "Available tool names: " + String.join(", ", toolNames) + "\n\n"
             + toolSchemas + "\n" + toolCallInstructions;
 
         boolean hasSystem = false;

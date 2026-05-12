@@ -475,6 +475,8 @@ public class ChatRuntimeService {
         }
 
         String prompt = buildDeepSeekPrompt(messagesToSend, isContinuationMode);
+        log.info("[buildUpstreamPayload] Prompt sent to DeepSeek ({} chars):\n{}", prompt.length(),
+            prompt.length() > 3000 ? prompt.substring(0, 3000) + "\n...[truncated]" : prompt);
         payload.put("prompt", prompt);
         payload.putArray("ref_file_ids");
 
@@ -571,11 +573,15 @@ public class ChatRuntimeService {
         // In continuation mode, format messages with proper DeepSeek tags
         // because we need to send tool results in the correct format
         if (isContinuation) {
+            log.info("[buildDeepSeekPrompt] Continuation mode, {} messages to format:", messages.size());
             StringBuilder sb = new StringBuilder();
             for (InternalRequest.Message msg : messages) {
                 String content = msg.content() != null ? msg.content() : "";
                 if (content.isBlank()) continue;
-                
+
+                log.info("[buildDeepSeekPrompt]   role={} content={}", msg.role(),
+                    content.length() > 300 ? content.substring(0, 300) + "..." : content);
+
                 switch (msg.role()) {
                     case "tool":
                         sb.append("<｜Tool｜>").append(content).append("<｜end▁of▁toolresults｜>");

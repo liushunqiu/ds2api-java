@@ -131,8 +131,15 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
 
         ResponsesStreamState state = new ResponsesStreamState();
 
+        // Build tool name case mapping: lowercase -> original name from Codex tools definition
+        Map<String, String> toolNameCaseMap = buildToolNameCaseMap(request.tools());
+        // Build parameter name mapping per tool: toolName -> {aliasParamName -> actualParamName}
+        Map<String, Map<String, String>> toolParamNameMap = buildToolParamNameMap(request.tools());
+        log.info("[Responses] Tool name case map: {}", toolNameCaseMap);
+        log.info("[Responses] Tool param name map: {}", toolParamNameMap);
+
         Flux<ServerSentEvent<String>> bodyEvents = events.concatMap(
-            event -> convertResponseEvent(event, responseId, state));
+            event -> convertResponseEvent(event, responseId, state, toolNameCaseMap, toolParamNameMap));
 
         // Terminal: text.done, part.done, output_item.done, completed
         Flux<ServerSentEvent<String>> tailEvents = Mono.fromSupplier(() -> {
@@ -224,7 +231,9 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
 
     private Flux<ServerSentEvent<String>> convertResponseEvent(InternalStreamEvent event,
                                                                 String respId,
-                                                                ResponsesStreamState state) {
+                                                                ResponsesStreamState state,
+                                                                Map<String, String> toolNameCaseMap,
+                                                                Map<String, Map<String, String>> toolParamNameMap) {
         List<ServerSentEvent<String>> out = new ArrayList<>(2);
 
         if (event instanceof InternalStreamEvent.ThinkingDelta td) {
@@ -301,7 +310,18 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
             )));
         } else if (event instanceof InternalStreamEvent.ToolCallStart s) {
             state.registerToolCall(s.callId());
-            state.setToolCallName(s.callId(), s.name());
+            // Fix tool name: DeepSeek may hallucinate tool names not in Codex's definition
+            String deepSeekName = s.name();
+            String originalName = toolNameCaseMap.getOrDefault(deepSeekName.toLowerCase(), deepSeekName);
+            boolean wasRemapped = !deepSeekName.equals(originalName);
+            state.setToolCallName(s.callId(), originalName);
+            if (wasRemapped) {
+                log.info("[Responses] >>> ToolCallStart: REMAPPED '{}' -> '{}' callId={} toolIndex={}",
+                    deepSeekName, originalName, s.callId(), s.toolIndex());
+            } else {
+                log.info("[Responses] >>> ToolCallStart: name={} callId={} toolIndex={}",
+                    originalName, s.callId(), s.toolIndex());
+            }
             out.add(sse("response.output_item.added", Map.of(
                 "type", "response.output_item.added",
                 "item_id", s.callId(),
@@ -310,18 +330,22 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
                     "type", "function_call",
                     "id", s.callId(),
                     "call_id", s.callId(),
-                    "name", s.name(),
+                    "name", originalName,
                     "status", "in_progress"
                 )
             )));
         } else if (event instanceof InternalStreamEvent.ToolCallDelta d) {
             if (state.hasToolCall(d.callId())) {
-                state.appendToolCallArguments(d.callId(), d.argumentsDelta());
+                String toolName = state.getToolCallName(d.callId());
+                String fixedArgs = fixParameterNames(toolName, d.argumentsDelta(), toolParamNameMap);
+                state.appendToolCallArguments(d.callId(), fixedArgs);
+                log.info("[Responses] >>> ToolCallDelta: callId={} toolName={} delta={}", d.callId(), toolName,
+                    fixedArgs.length() > 200 ? fixedArgs.substring(0, 200) + "..." : fixedArgs);
                 out.add(sse("response.function_call_arguments.delta", Map.of(
                     "type", "response.function_call_arguments.delta",
                     "item_id", d.callId(),
                     "response_id", respId,
-                    "delta", d.argumentsDelta()
+                    "delta", fixedArgs
                 )));
             }
         } else if (event instanceof InternalStreamEvent.ToolCallEnd e) {
@@ -329,6 +353,8 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
                 String callId = e.callId();
                 String name = state.getToolCallName(callId);
                 String args = state.getToolCallArguments(callId);
+                log.info("[Responses] >>> ToolCallEnd: name={} callId={} fullArgs={}", name, callId,
+                    args != null && args.length() > 500 ? args.substring(0, 500) + "..." : args);
                 out.add(sse("response.function_call_arguments.done", Map.of(
                     "type", "response.function_call_arguments.done",
                     "item_id", callId,
@@ -422,6 +448,176 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
         } catch (Exception e) {
             throw new RuntimeException("SSE serialize error", e);
         }
+    }
+
+    /**
+     * Build parameter name mapping per tool from the tool schema.
+     * Maps common aliases to actual parameter names.
+     * e.g., for exec_command: {"command" -> "cmd", "cmd" -> "cmd"}
+     */
+    private Map<String, Map<String, String>> buildToolParamNameMap(JsonNode tools) {
+        Map<String, Map<String, String>> result = new HashMap<>();
+        if (tools == null || !tools.isArray()) return result;
+
+        for (JsonNode tool : tools) {
+            String name = tool.path("function").path("name").asText("");
+            if (name.isEmpty()) name = tool.path("name").asText("");
+            if (name.isEmpty()) continue;
+
+            JsonNode props = tool.path("function").path("parameters").path("properties");
+            if (!props.isObject()) continue;
+
+            Map<String, String> paramMap = new HashMap<>();
+            List<String> actualNames = new ArrayList<>();
+            props.fieldNames().forEachRemaining(actualNames::add);
+
+            // For each actual parameter name, add common aliases
+            for (String paramName : actualNames) {
+                paramMap.put(paramName.toLowerCase(), paramName);
+                String lower = paramName.toLowerCase();
+
+                // cmd <-> command
+                if (lower.equals("cmd")) {
+                    paramMap.put("command", paramName);
+                } else if (lower.equals("command")) {
+                    paramMap.put("cmd", paramName);
+                }
+
+                // file_path <-> path
+                if (lower.equals("file_path") || lower.equals("filepath")) {
+                    paramMap.put("path", paramName);
+                    paramMap.put("file", paramName);
+                } else if (lower.equals("path")) {
+                    paramMap.put("file_path", paramName);
+                    paramMap.put("filepath", paramName);
+                }
+
+                // content <-> text <-> data
+                if (lower.equals("content")) {
+                    paramMap.put("text", paramName);
+                    paramMap.put("data", paramName);
+                    paramMap.put("body", paramName);
+                } else if (lower.equals("text")) {
+                    paramMap.put("content", paramName);
+                    paramMap.put("data", paramName);
+                }
+
+                // description <-> desc
+                if (lower.equals("description")) {
+                    paramMap.put("desc", paramName);
+                } else if (lower.equals("desc")) {
+                    paramMap.put("description", paramName);
+                }
+            }
+
+            if (!paramMap.isEmpty()) {
+                result.put(name, paramMap);
+                // Also store with lowercase tool name for lookup
+                result.put(name.toLowerCase(), paramMap);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Fix parameter names in the arguments JSON to match Codex's tool schema.
+     * DeepSeek may output "command" but Codex expects "cmd", etc.
+     */
+    private String fixParameterNames(String toolName, String argsJson, Map<String, Map<String, String>> toolParamNameMap) {
+        if (toolName == null || argsJson == null || argsJson.isBlank()) return argsJson;
+
+        Map<String, String> paramMap = toolParamNameMap.get(toolName);
+        if (paramMap == null) paramMap = toolParamNameMap.get(toolName.toLowerCase());
+        if (paramMap == null || paramMap.isEmpty()) return argsJson;
+
+        try {
+            JsonNode argsNode = mapper.readTree(argsJson);
+            if (!argsNode.isObject()) return argsJson;
+
+            ObjectNode fixed = mapper.createObjectNode();
+            Iterator<Map.Entry<String, JsonNode>> fields = argsNode.fields();
+            boolean changed = false;
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                String paramName = entry.getKey();
+                String mapped = paramMap.get(paramName.toLowerCase());
+                if (mapped != null && !mapped.equals(paramName)) {
+                    fixed.set(mapped, entry.getValue());
+                    changed = true;
+                    log.info("[Responses]   Param remapped: '{}' -> '{}' for tool '{}'", paramName, mapped, toolName);
+                } else {
+                    fixed.set(paramName, entry.getValue());
+                }
+            }
+            return changed ? mapper.writeValueAsString(fixed) : argsJson;
+        } catch (Exception e) {
+            log.warn("[Responses] Failed to fix parameter names: {}", e.getMessage());
+            return argsJson;
+        }
+    }
+
+    /**
+     * Build a case-insensitive mapping from lowercase tool name to original tool name
+     * as defined by Codex. DeepSeek may return lowercase tool names (e.g., "bash")
+     * while Codex expects the original casing (e.g., "Bash").
+     *
+     * Also includes common aliases for DeepSeek hallucinated tool names.
+     */
+    private Map<String, String> buildToolNameCaseMap(JsonNode tools) {
+        Map<String, String> map = new HashMap<>();
+        List<String> originalNames = new ArrayList<>();
+        if (tools == null || !tools.isArray()) return map;
+        for (JsonNode tool : tools) {
+            String name = tool.path("function").path("name").asText("");
+            if (name.isEmpty()) {
+                name = tool.path("name").asText("");
+            }
+            if (!name.isEmpty()) {
+                map.put(name.toLowerCase(), name);
+                originalNames.add(name);
+            }
+        }
+        // Add common DeepSeek -> Codex aliases based on semantic matching
+        for (String name : originalNames) {
+            String lower = name.toLowerCase();
+            if (lower.contains("exec") || lower.contains("command") || lower.contains("bash") || lower.contains("shell") || lower.contains("run")) {
+                map.putIfAbsent("bash", name);
+                map.putIfAbsent("shell", name);
+                map.putIfAbsent("terminal", name);
+                map.putIfAbsent("run", name);
+                map.putIfAbsent("execute", name);
+            }
+            if (lower.contains("read") || lower.contains("file") || lower.contains("view") || lower.contains("open")) {
+                map.putIfAbsent("read_file", name);
+                map.putIfAbsent("readfile", name);
+                map.putIfAbsent("open_file", name);
+                map.putIfAbsent("cat", name);
+            }
+            if (lower.contains("list") || lower.contains("dir") || lower.contains("ls") || lower.contains("glob") || lower.contains("find")) {
+                map.putIfAbsent("list_files", name);
+                map.putIfAbsent("listfiles", name);
+                map.putIfAbsent("ls", name);
+                map.putIfAbsent("find", name);
+                map.putIfAbsent("glob", name);
+            }
+            if (lower.contains("write") || lower.contains("save") || lower.contains("create")) {
+                map.putIfAbsent("write_file", name);
+                map.putIfAbsent("writefile", name);
+                map.putIfAbsent("save_file", name);
+                map.putIfAbsent("create_file", name);
+            }
+            if (lower.contains("edit") || lower.contains("patch") || lower.contains("modify") || lower.contains("update")) {
+                map.putIfAbsent("edit_file", name);
+                map.putIfAbsent("apply_patch", name);
+                map.putIfAbsent("patch", name);
+            }
+            if (lower.contains("search") || lower.contains("grep") || lower.contains("find_text")) {
+                map.putIfAbsent("search", name);
+                map.putIfAbsent("grep", name);
+                map.putIfAbsent("search_files", name);
+            }
+        }
+        return map;
     }
 
     /** Per-subscription state machine. */

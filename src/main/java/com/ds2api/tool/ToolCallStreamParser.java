@@ -31,6 +31,8 @@ public class ToolCallStreamParser {
 
     public List<InternalStreamEvent> processChunk(String chunk) {
         if (chunk == null || chunk.isEmpty()) return List.of();
+        log.debug("[ToolParser] processChunk: state={} chunkLen={} chunk={}", state, chunk.length(),
+            chunk.length() > 200 ? chunk.substring(0, 200) + "..." : chunk);
         buffer.append(chunk);
         return drain();
     }
@@ -38,6 +40,9 @@ public class ToolCallStreamParser {
     public List<InternalStreamEvent> flushAndReset() {
         List<InternalStreamEvent> events = new ArrayList<>();
         if (!buffer.isEmpty()) {
+            log.info("[ToolParser] flushAndReset: releasing buffered text ({} chars): {}",
+                buffer.length(),
+                buffer.length() > 300 ? buffer.substring(0, 300) + "..." : buffer.toString());
             events.add(new InternalStreamEvent.TextDelta(buffer.toString()));
         }
         reset();
@@ -90,7 +95,7 @@ public class ToolCallStreamParser {
             int afterStart = tcIdx + tcStart.group().length();
             buffer.delete(0, afterStart);
             state = State.CAPTURING;
-            log.debug("[ToolCallStreamParser] Entered CAPTURING after <tool_calls>");
+            log.info("[ToolParser] Entered CAPTURING after <tool_calls> tag found at idx={}", tcIdx);
             return true;
         } else {
             int safeEnd = findSafeEnd(text);
