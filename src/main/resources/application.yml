@@ -3,6 +3,8 @@ server:
   shutdown: graceful
 
 spring:
+  codec:
+    max-in-memory-size: 10MB
   webflux:
     hiddenmethod:
       enabled: true
