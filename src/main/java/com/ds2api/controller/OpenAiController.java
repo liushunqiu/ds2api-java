@@ -95,7 +95,20 @@ public class OpenAiController {
     @PostMapping("/chat/completions")
     public Flux<ServerSentEvent<String>> chatCompletions(
             @RequestBody JsonNode body, ServerWebExchange exchange) {
+        String clientSessionId = exchange.getRequest().getHeaders().getFirst("Session_id");
+        if (clientSessionId == null || clientSessionId.isBlank()) {
+            clientSessionId = exchange.getRequest().getHeaders().getFirst("X-Claude-Code-Session-Id");
+        }
+        log.debug("Session_id from header: '{}'", clientSessionId);
+        final String sessionIdFromHeader = clientSessionId;
+
         return chatAdapter.normalizeRequest(body)
+            .map(req -> {
+                if (sessionIdFromHeader != null && !sessionIdFromHeader.isBlank()) {
+                    return req.withConversationId(sessionIdFromHeader);
+                }
+                return req;
+            })
             .flatMapMany(req -> {
                 String reqId = "chat_" + UUID.randomUUID().toString().substring(0, 8);
                 String resolvedModel = modelAlias.resolveModel(req.model())
@@ -124,7 +137,20 @@ public class OpenAiController {
         String respId = "resp_" + UUID.randomUUID().toString().replace("-", "");
         log.debug("Response create [{}]", respId);
 
+        String clientSessionId = exchange.getRequest().getHeaders().getFirst("Session_id");
+        if (clientSessionId == null || clientSessionId.isBlank()) {
+            clientSessionId = exchange.getRequest().getHeaders().getFirst("X-Claude-Code-Session-Id");
+        }
+        log.debug("Session_id from header for responses: '{}'", clientSessionId);
+        final String sessionIdFromHeader = clientSessionId;
+
         return responsesAdapter.normalizeRequest(body)
+            .map(req -> {
+                if (sessionIdFromHeader != null && !sessionIdFromHeader.isBlank()) {
+                    return req.withConversationId(sessionIdFromHeader);
+                }
+                return req;
+            })
             .flatMapMany(req -> {
                 String resolvedModel = modelAlias.resolveModel(req.model())
                         .orElse(req.model());

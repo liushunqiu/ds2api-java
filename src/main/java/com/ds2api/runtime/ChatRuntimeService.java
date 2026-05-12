@@ -125,6 +125,7 @@ public class ChatRuntimeService {
 
         // Check for session continuation via conversation_id
         String conversationId = request.conversationId();
+        log.debug("[{}] ConversationId from request: '{}'", requestId, conversationId);
         DeepSeekSessionCacheService.SessionInfo cachedSession = null;
         boolean isContinuation = false;
 
@@ -304,7 +305,11 @@ public class ChatRuntimeService {
                             });
                     }
                     return resp.bodyToFlux(String.class)
-                        .doOnNext(raw -> log.debug("[{}] Raw upstream chunk: {}", requestId, raw))
+                        .doOnNext(raw -> {
+                            log.debug("[{}] Raw upstream chunk: {}", requestId, raw);
+                            log.debug("[{}] Calling extractAndCacheResponseMessageIdFromChunk with conversationId='{}', sessionId='{}'", requestId, conversationId, sessionId);
+                            extractAndCacheResponseMessageIdFromChunk(raw, conversationId, sessionId);
+                        })
                         .map(this::parseUpstreamChunk)
                         .filter(event -> !(event instanceof InternalStreamEvent.TextDelta td) || !td.chunk().isEmpty())
                         .doOnNext(event -> log.debug("[{}] Parsed event: {}", requestId, event))
@@ -359,30 +364,39 @@ public class ChatRuntimeService {
      * The ready event format: {"request_message_id":1,"response_message_id":2,"model_type":"expert"}
      */
     private void extractAndCacheResponseMessageId(List<String> chunks, String conversationId, String sessionId) {
+        for (String chunk : chunks) {
+            extractAndCacheResponseMessageIdFromChunk(chunk, conversationId, sessionId);
+        }
+    }
+
+    /**
+     * Extract response_message_id from a single SSE chunk and cache it.
+     * The ready event format: {"request_message_id":1,"response_message_id":2,"model_type":"expert"}
+     */
+    private void extractAndCacheResponseMessageIdFromChunk(String chunk, String conversationId, String sessionId) {
         if (conversationId == null || conversationId.isBlank()) return;
 
-        for (String chunk : chunks) {
-            String trimmed = chunk.trim();
-            // Look for ready event data
-            if (trimmed.startsWith("data:") && trimmed.contains("response_message_id")) {
-                String json = trimmed.substring(5).trim();
-                try {
-                    JsonNode node = mapper.readTree(json);
-                    if (node.has("response_message_id")) {
-                        int responseMessageId = node.get("response_message_id").asInt();
-                        // Cache or update the session
-                        if (sessionCache.contains(conversationId)) {
-                            sessionCache.updateResponseMessageId(conversationId, responseMessageId);
-                        } else {
-                            sessionCache.put(conversationId, sessionId, responseMessageId);
-                        }
-                        log.debug("[Session] Cached response_message_id={} for conversation={}",
-                                responseMessageId, conversationId);
-                        return;
+        String trimmed = chunk.trim();
+        // Look for ready event with response_message_id
+        // DeepSeek sends plain JSON: {"request_message_id":1,"response_message_id":2,...}
+        if (trimmed.contains("response_message_id")) {
+            try {
+                // Handle both plain JSON and SSE format (data: {...})
+                String json = trimmed.startsWith("data:") ? trimmed.substring(5).trim() : trimmed;
+                JsonNode node = mapper.readTree(json);
+                if (node.has("response_message_id")) {
+                    int responseMessageId = node.get("response_message_id").asInt();
+                    // Cache or update the session
+                    if (sessionCache.contains(conversationId)) {
+                        sessionCache.updateResponseMessageId(conversationId, responseMessageId);
+                    } else {
+                        sessionCache.put(conversationId, sessionId, responseMessageId);
                     }
-                } catch (Exception e) {
-                    log.trace("[Session] Failed to parse ready event: {}", json, e);
+                    log.debug("[Session] Cached response_message_id={} for conversation={}",
+                            responseMessageId, conversationId);
                 }
+            } catch (Exception e) {
+                log.trace("[Session] Failed to parse ready event: {}", trimmed, e);
             }
         }
     }
