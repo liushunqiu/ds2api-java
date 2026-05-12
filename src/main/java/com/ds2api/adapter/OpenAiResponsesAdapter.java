@@ -312,7 +312,10 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
             state.registerToolCall(s.callId());
             // Fix tool name: DeepSeek may hallucinate tool names not in Codex's definition
             String deepSeekName = s.name();
-            String originalName = toolNameCaseMap.getOrDefault(deepSeekName.toLowerCase(), deepSeekName);
+            String originalName = toolNameCaseMap.get(deepSeekName.toLowerCase());
+            if (originalName == null) {
+                originalName = toolNameCaseMap.getOrDefault("__default__", deepSeekName);
+            }
             boolean wasRemapped = !deepSeekName.equals(originalName);
             state.setToolCallName(s.callId(), originalName);
             if (wasRemapped) {
@@ -578,6 +581,16 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
             }
         }
         // Add common DeepSeek -> Codex aliases based on semantic matching
+        // Find the primary "exec" tool (one that accepts command/cmd parameter)
+        String execTool = null;
+        for (String name : originalNames) {
+            String lower = name.toLowerCase();
+            if (lower.contains("exec") || lower.contains("command") || lower.contains("bash") || lower.contains("shell") || lower.contains("run")) {
+                execTool = name;
+                break;
+            }
+        }
+
         for (String name : originalNames) {
             String lower = name.toLowerCase();
             if (lower.contains("exec") || lower.contains("command") || lower.contains("bash") || lower.contains("shell") || lower.contains("run")) {
@@ -586,12 +599,14 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
                 map.putIfAbsent("terminal", name);
                 map.putIfAbsent("run", name);
                 map.putIfAbsent("execute", name);
+                map.putIfAbsent("cmd", name);
             }
-            if (lower.contains("read") || lower.contains("file") || lower.contains("view") || lower.contains("open")) {
+            if (lower.contains("read") || lower.contains("file") || lower.contains("view") || lower.contains("open") || lower.contains("cat")) {
                 map.putIfAbsent("read_file", name);
                 map.putIfAbsent("readfile", name);
                 map.putIfAbsent("open_file", name);
                 map.putIfAbsent("cat", name);
+                map.putIfAbsent("read", name);
             }
             if (lower.contains("list") || lower.contains("dir") || lower.contains("ls") || lower.contains("glob") || lower.contains("find")) {
                 map.putIfAbsent("list_files", name);
@@ -599,23 +614,31 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
                 map.putIfAbsent("ls", name);
                 map.putIfAbsent("find", name);
                 map.putIfAbsent("glob", name);
+                map.putIfAbsent("list", name);
             }
             if (lower.contains("write") || lower.contains("save") || lower.contains("create")) {
                 map.putIfAbsent("write_file", name);
                 map.putIfAbsent("writefile", name);
                 map.putIfAbsent("save_file", name);
                 map.putIfAbsent("create_file", name);
+                map.putIfAbsent("write", name);
             }
             if (lower.contains("edit") || lower.contains("patch") || lower.contains("modify") || lower.contains("update")) {
                 map.putIfAbsent("edit_file", name);
                 map.putIfAbsent("apply_patch", name);
                 map.putIfAbsent("patch", name);
+                map.putIfAbsent("edit", name);
             }
             if (lower.contains("search") || lower.contains("grep") || lower.contains("find_text")) {
                 map.putIfAbsent("search", name);
                 map.putIfAbsent("grep", name);
                 map.putIfAbsent("search_files", name);
             }
+        }
+
+        // Store execTool name as default fallback for any unknown tool
+        if (execTool != null) {
+            map.put("__default__", execTool);
         }
         return map;
     }
