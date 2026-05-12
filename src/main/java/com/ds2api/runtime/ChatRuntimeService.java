@@ -170,7 +170,7 @@ public class ChatRuntimeService {
                     .doFinally(signal -> {
                         toolParser.flushAndReset();
                         toolParser.reset();
-                        if (!continueSession) {
+                        if (!continueSession && (conversationId == null || conversationId.isBlank())) {
                             sessionClient.deleteSession(sessionId,
                                 config.getAutoDelete().getMode(), directToken).subscribe();
                         }
@@ -221,7 +221,7 @@ public class ChatRuntimeService {
                                     .doFinally(signal -> {
                                         toolParser.flushAndReset();
                                         toolParser.reset();
-                                        if (!continueSession) {
+                                        if (!continueSession && (conversationId == null || conversationId.isBlank())) {
                                             sessionClient.deleteSession(sessionId,
                                                 config.getAutoDelete().getMode(), token).subscribe();
                                         }
@@ -366,13 +366,23 @@ public class ChatRuntimeService {
                             return Flux.just(event);
                         });
                 })
-                // P2: exponential backoff retry for 429/503 only
+                // P2: exponential backoff retry for 429/503 and PrematureCloseException
                 .retryWhen(Retry.backoff(3, Duration.ofMillis(500))
-                    .filter(e -> e instanceof UpstreamException ue &&
-                                 (ue.getStatusCode().value() == 429 ||
-                                  ue.getStatusCode().value() == 503))
-                    .doBeforeRetry(sig -> log.warn("[{}] Retry upstream attempt {}: {}",
-                        requestId, sig.totalRetries() + 1, sig.failure().getMessage()))
+                    .filter(e -> {
+                        if (e instanceof UpstreamException ue) {
+                            return ue.getStatusCode().value() == 429 || ue.getStatusCode().value() == 503;
+                        }
+                        if (e instanceof reactor.netty.http.client.PrematureCloseException) {
+                            return true;
+                        }
+                        return false;
+                    })
+                    .doBeforeRetry(sig -> {
+                        log.warn("[{}] Retry upstream attempt {}: {}",
+                            requestId, sig.totalRetries() + 1, sig.failure().getMessage());
+                        toolParser.flushAndReset();
+                        toolParser.reset();
+                    })
                     .onRetryExhaustedThrow((spec, sig) -> sig.failure()))
                 .doOnCancel(() -> log.info("[{}] Client disconnected, cancelling upstream",
                     requestId))
@@ -515,14 +525,16 @@ public class ChatRuntimeService {
         // Check if last message is a tool result (tool call scenario)
         InternalRequest.Message lastMsg = messages.get(messages.size() - 1);
         if ("tool".equals(lastMsg.role())) {
-            // Find the assistant message with tool_calls before this tool message
+            // Find the earliest consecutive assistant message with tool_calls before this tool message
             int assistantIdx = -1;
             for (int i = messages.size() - 2; i >= 0; i--) {
                 InternalRequest.Message msg = messages.get(i);
                 if ("assistant".equals(msg.role())) {
-                    // Check if this assistant message contains tool_calls
                     if (msg.content() != null && msg.content().contains("<|DSML|tool_calls>")) {
                         assistantIdx = i;
+                        // Keep scanning backwards to find the earliest tool_calls
+                    } else {
+                        // Hit a non-tool_calls assistant message, stop scanning
                         break;
                     }
                 }
