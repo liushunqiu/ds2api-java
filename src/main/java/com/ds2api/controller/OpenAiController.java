@@ -164,7 +164,16 @@ public class OpenAiController {
                 if (resolved.tools() != null && resolved.tools().isArray()) {
                     for (JsonNode tool : resolved.tools()) {
                         String toolName = tool.path("name").asText("");
-                        if (toolName.isEmpty()) toolName = tool.path("function").path("name").asText("?");
+                        if (toolName.isEmpty()) {
+                            JsonNode func = tool.path("function");
+                            if (!func.isMissingNode()) {
+                                toolName = func.path("name").asText("");
+                            }
+                        }
+                        if (toolName.isEmpty()) {
+                            log.warn("[{}]   Skipping tool with empty name: {}", respId, tool);
+                            continue;
+                        }
                         JsonNode schema = null;
                         for (String key : new String[]{"parameters", "input_schema", "inputSchema", "schema"}) {
                             JsonNode n = tool.path(key);

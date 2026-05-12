@@ -13,13 +13,13 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Loads config.json at startup, watches for file changes, and hot-reloads.
- * The current config is exposed via getConfig() and is always valid
- * (falls back to defaults if the file is missing or malformed).
+ * 启动时加载 config.json，监听文件变更并热重载。
+ * 通过 getConfig() 暴露当前配置，始终有效
+ * （文件缺失或格式错误时回退到默认值）。
  *
- * Environment variable overrides:
+ * 环境变量覆盖：
  *   DS2API_ADMIN_KEY  - overrides config.json's admin_key field
- *   DS2API_CONFIG_PATH - external path to config.json
+ *   DS2API_CONFIG_PATH - config.json 的外部路径
  */
 @Service
 public class ConfigLoaderService {
@@ -51,15 +51,15 @@ public class ConfigLoaderService {
         }
     }
 
-    /** Returns the current live config (never null). */
+    /** 返回当前有效配置（永远不会为 null）。 */
     public Ds2Config getConfig() {
         return configRef.get();
     }
 
-    /** Force reload from disk. Returns true on success, false if defaults were used. */
+    /** 从磁盘强制重新加载。成功返回 true，使用默认值时返回 false。 */
     public boolean reload() {
         if (!Files.exists(configPath)) {
-            log.warn("config.json not found at {}, using defaults", configPath);
+            log.warn("在 {} 未找到 config.json，使用默认配置", configPath);
             applyEnvOverrides(configRef.get());
             return false;
         }
@@ -68,7 +68,7 @@ public class ConfigLoaderService {
             Ds2Config cfg = mapper.readValue(content, Ds2Config.class);
             applyEnvOverrides(cfg);
             configRef.set(cfg);
-            log.info("Config loaded from {} ({} keys, {} api_keys, {} accounts, {} aliases)",
+            log.info("已加载配置 {} ({} 个密钥, {} 个API密钥, {} 个账号, {} 个别名)",
                 configPath,
                 cfg.getKeys().size(),
                 cfg.getApiKeys().size(),
@@ -76,13 +76,13 @@ public class ConfigLoaderService {
                 cfg.getModelAliases().size());
             return true;
         } catch (IOException e) {
-            log.error("Failed to load config.json: {}", e.getMessage());
+            log.error("加载 config.json 失败: {}", e.getMessage());
             return false;
         }
     }
 
     /**
-     * Apply environment variable overrides after loading config.
+     * 加载配置后应用环境变量覆盖。
      * DS2API_ADMIN_KEY takes precedence over config.json's admin_key.
      */
     private void applyEnvOverrides(Ds2Config cfg) {
@@ -99,7 +99,7 @@ public class ConfigLoaderService {
         }
         final Path finalWatchDir = watchDir;
         if (!Files.isDirectory(finalWatchDir)) {
-            log.warn("Config directory {} not found, hot-reload disabled", finalWatchDir);
+            log.warn("配置目录 {} 不存在，热重载已禁用", finalWatchDir);
             return;
         }
         String configFileName = configPath.getFileName().toString();
@@ -108,13 +108,13 @@ public class ConfigLoaderService {
                 finalWatchDir.register(ws,
                     StandardWatchEventKinds.ENTRY_MODIFY,
                     StandardWatchEventKinds.ENTRY_CREATE);
-                log.info("Watching {} for config changes", finalWatchDir);
+                log.info("正在监听 {} 的配置变更", finalWatchDir);
                 while (!Thread.currentThread().isInterrupted()) {
                     WatchKey key = ws.take();
                     for (WatchEvent<?> event : key.pollEvents()) {
                         Path changed = (Path) event.context();
                         if (changed.toString().equals(configFileName)) {
-                            log.info("config.json changed, reloading...");
+                            log.info("config.json 已变更，正在重新加载...");
                             Thread.sleep(200);
                             reload();
                         }
@@ -124,7 +124,7 @@ public class ConfigLoaderService {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             } catch (IOException e) {
-                log.error("Config watcher error: {}", e.getMessage());
+                log.error("配置文件监听出错: {}", e.getMessage());
             }
         });
         watcherThread.setDaemon(true);

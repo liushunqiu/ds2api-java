@@ -196,8 +196,10 @@ public class ToolCallStreamParser {
      */
     private java.util.Map<String, Object> parseParametersAsStructured(String body) {
         java.util.Map<String, Object> result = new java.util.LinkedHashMap<>();
+        // Sanitize body: escape special chars inside CDATA that break XML parsing
+        String sanitized = sanitizeXmlContent(body);
         // Wrap in a root element for XML parsing
-        String xml = "<root>" + body + "</root>";
+        String xml = "<root>" + sanitized + "</root>";
         try {
             javax.xml.parsers.DocumentBuilderFactory factory = javax.xml.parsers.DocumentBuilderFactory.newInstance();
             factory.setNamespaceAware(false);
@@ -215,6 +217,16 @@ public class ToolCallStreamParser {
             return fallback;
         }
         return result;
+    }
+
+    /**
+     * Sanitize XML content by escaping special characters inside CDATA sections
+     * that would cause XML parsing to fail (e.g., ]]> sequences).
+     */
+    private String sanitizeXmlContent(String content) {
+        if (content == null) return "";
+        // Fix CDATA sections that contain ]]> by splitting them
+        return content.replaceAll("]]>", "]]]]><![CDATA[>");
     }
 
     private void parseChildParameters(org.w3c.dom.Element parent, java.util.Map<String, Object> result) {
@@ -357,10 +369,12 @@ public class ToolCallStreamParser {
 
     /**
      * If a value is a JSON string (starts with { or [), parse it into a structured object.
+     * Also converts numeric strings to numbers and boolean strings to booleans.
      */
     private Object unwrapJsonValue(Object value) {
         if (value instanceof String str) {
             String trimmed = str.trim();
+            // JSON object or array
             if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
                 try {
                     com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
@@ -368,6 +382,25 @@ public class ToolCallStreamParser {
                 } catch (Exception e) {
                     // Not valid JSON, keep as string
                 }
+            }
+            // Boolean
+            if ("true".equalsIgnoreCase(trimmed)) return Boolean.TRUE;
+            if ("false".equalsIgnoreCase(trimmed)) return Boolean.FALSE;
+            if ("null".equalsIgnoreCase(trimmed)) return null;
+            // Number conversion
+            try {
+                if (trimmed.contains(".")) {
+                    return Double.parseDouble(trimmed);
+                } else {
+                    long longVal = Long.parseLong(trimmed);
+                    // Fit into int if possible for cleaner JSON
+                    if (longVal >= Integer.MIN_VALUE && longVal <= Integer.MAX_VALUE) {
+                        return (int) longVal;
+                    }
+                    return longVal;
+                }
+            } catch (NumberFormatException e) {
+                // Not a number, keep as string
             }
         }
         return value;
