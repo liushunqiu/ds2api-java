@@ -96,9 +96,6 @@ public class OpenAiController {
     public Flux<ServerSentEvent<String>> chatCompletions(
             @RequestBody JsonNode body, ServerWebExchange exchange) {
         String clientSessionId = exchange.getRequest().getHeaders().getFirst("Session_id");
-        if (clientSessionId == null || clientSessionId.isBlank()) {
-            clientSessionId = exchange.getRequest().getHeaders().getFirst("X-Claude-Code-Session-Id");
-        }
         log.debug("Session_id from header: '{}'", clientSessionId);
         final String sessionIdFromHeader = clientSessionId;
 
@@ -138,9 +135,6 @@ public class OpenAiController {
         log.debug("Response create [{}]", respId);
 
         String clientSessionId = exchange.getRequest().getHeaders().getFirst("Session_id");
-        if (clientSessionId == null || clientSessionId.isBlank()) {
-            clientSessionId = exchange.getRequest().getHeaders().getFirst("X-Claude-Code-Session-Id");
-        }
         log.debug("Session_id from header for responses: '{}'", clientSessionId);
         final String sessionIdFromHeader = clientSessionId;
 
