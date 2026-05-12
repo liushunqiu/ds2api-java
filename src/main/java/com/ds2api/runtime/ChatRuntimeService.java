@@ -37,41 +37,34 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Core streaming pipeline: acquires an account lease from the pool,
- * resolves the token, applies P1 compat layers (thinking injection,
- * tool definition injection, history file splitting), sends requests
- * to upstream DeepSeek, and parses the SSE stream into unified
- * InternalStreamEvent emissions.
+ * Core service that orchestrates upstream DeepSeek API calls and SSE stream parsing.
  *
- * Token flow:
- *   DIRECT mode  -> use the raw token from ApiAuthFilter, bypass pool
- *   MANAGED mode -> acquire a pool slot, use the account's token,
- *                   on 401 trigger TokenRefreshService and retry once.
- *
- * PoW is handled proactively: DeepSeekPowClient fetches and solves the PoW
- * challenge before sending the completion request (aligned with Go reference).
- *
- * P2 additions:
- *   - Exponential backoff retry on upstream 429/503 (max 3 attempts, 500ms initial)
- *   - Packet capture integration via PacketCaptureService
- *
- * Session continuation:
- *   - Supports DeepSeek native multi-turn via conversation_id
- *   - Caches chat_session_id and response_message_id for continuation
+ * <p>Responsibilities:
+ * <ul>
+ *   <li>Normalizes internal requests into upstream payload format</li>
+ *   <li>Handles upstream HTTP calls with retry logic</li>
+ *   <li>Parses upstream SSE chunks into unified InternalStreamEvent stream</li>
+ *   <li>Manages tool call stream parsing via ToolCallStreamParser</li>
+ *   <li>Caches chat_session_id and response_message_id for continuation
+ * </ul>
  */
 @Service
 public class ChatRuntimeService {
 
     private static final Logger log = LoggerFactory.getLogger(ChatRuntimeService.class);
 
-    /** Track THINK fragment IDs to return as ThinkingDelta instead of TextDelta. */
-    private final Set<String> thinkFragmentIds = ConcurrentHashMap.newKeySet();
-
-    /** Track whether we are currently in a THINK fragment (for handling pathless chunks). */
-    private volatile boolean inThinkFragment = false;
-
-    /** Accumulate thinking content for final logging. */
-    private final StringBuilder thinkingAccumulator = new StringBuilder();
+    /**
+     * Request-scoped state for tracking THINK fragments.
+     * Each request gets its own instance to avoid cross-request state contamination.
+     */
+    private static class ThinkState {
+        /** Track THINK fragment IDs to return as ThinkingDelta instead of TextDelta. */
+        final Set<String> thinkFragmentIds = ConcurrentHashMap.newKeySet();
+        /** Track whether we are currently in a THINK fragment (for handling pathless chunks). */
+        volatile boolean inThinkFragment = false;
+        /** Accumulate thinking content for final logging. */
+        final StringBuilder thinkingAccumulator = new StringBuilder();
+    }
 
     private final WebClient deepSeekClient;
     private final ConfigLoaderService configLoader;
@@ -305,8 +298,8 @@ public class ChatRuntimeService {
                                                        String sessionId,
                                                        String conversationId,
                                                        String accountIdentifier) {
-        // Clear THINK fragment tracking for new request
-        clearThinkFragmentIds();
+        // Create request-scoped THINK state to avoid cross-request contamination
+        ThinkState thinkState = new ThinkState();
 
         String payloadStr = payload.toString(); // cached for packet capture
         log.info("[{}] Upstream payload: {}", requestId, payloadStr);
@@ -345,7 +338,7 @@ public class ChatRuntimeService {
                             extractAndCacheResponseMessageIdFromChunk(raw, conversationId, sessionId, accountIdentifier);
                         })
                         .map(raw -> {
-                            InternalStreamEvent event = parseUpstreamChunk(raw);
+                            InternalStreamEvent event = parseUpstreamChunk(raw, thinkState);
                             log.info("[{}] Parse upstream chunk result: {}", requestId, event);
                             return event;
                         })
@@ -594,7 +587,7 @@ public class ChatRuntimeService {
      * Never returns null (Reactive map() disallows null).
      * Aligned with Go reference: internal/sse/parser.go ParseSSEChunkForContentDetailed().
      */
-    InternalStreamEvent parseUpstreamChunk(String rawChunk) {
+    InternalStreamEvent parseUpstreamChunk(String rawChunk, ThinkState thinkState) {
         if ("[DONE]".equals(rawChunk.trim())) {
             return new InternalStreamEvent.Finish("stop");
         }
@@ -649,25 +642,25 @@ public class ChatRuntimeService {
                 && value.isTextual() && (op == null || "APPEND".equals(op))) {
                 // Extract fragment index from path like "response/fragments/2/content" or "response/fragments/-1/content"
                 String fragId = extractFragmentId(path);
-                if (fragId != null && thinkFragmentIds.contains(fragId)) {
+                if (fragId != null && thinkState.thinkFragmentIds.contains(fragId)) {
                     // This is a THINK fragment, return as ThinkingDelta
-                    inThinkFragment = true;
+                    thinkState.inThinkFragment = true;
                     String text = value.asText();
                     if (!text.isEmpty()) {
-                        return createThinkingDelta(text);
+                        return createThinkingDelta(text, thinkState);
                     }
                     return new InternalStreamEvent.TextDelta("");
                 }
                 // If we're in a THINK fragment and this is -1 (last fragment), treat as thinking
-                if (inThinkFragment && "-1".equals(fragId)) {
+                if (thinkState.inThinkFragment && "-1".equals(fragId)) {
                     String text = value.asText();
                     if (!text.isEmpty()) {
-                        return createThinkingDelta(text);
+                        return createThinkingDelta(text, thinkState);
                     }
                     return new InternalStreamEvent.TextDelta("");
                 }
                 // Not a think fragment, switch out of think mode
-                exitThinkMode();
+                exitThinkMode(thinkState);
                 String text = value.asText();
                 if (!text.isEmpty()) {
                     return new InternalStreamEvent.TextDelta(text);
@@ -688,9 +681,9 @@ public class ChatRuntimeService {
                     if ("THINK".equals(type)) {
                         // Track this THINK fragment ID (both actual ID and -1 for last fragment)
                         if (fragIdStr != null) {
-                            thinkFragmentIds.add(fragIdStr);
-                            thinkFragmentIds.add("-1"); // -1 means "last fragment" in subsequent APPEND ops
-                            inThinkFragment = true;
+                            thinkState.thinkFragmentIds.add(fragIdStr);
+                            thinkState.thinkFragmentIds.add("-1"); // -1 means "last fragment" in subsequent APPEND ops
+                            thinkState.inThinkFragment = true;
                             log.debug("[parseUpstreamChunk] Registered THINK fragment id={} and -1", fragIdStr);
                         }
                         // THINK fragment may have "content" field
@@ -700,9 +693,9 @@ public class ChatRuntimeService {
                         }
                     } else if ("RESPONSE".equals(type)) {
                         // RESPONSE fragment - switch out of think mode
-                        exitThinkMode();
+                        exitThinkMode(thinkState);
                         // Remove -1 from think fragment IDs since it now points to RESPONSE
-                        thinkFragmentIds.remove("-1");
+                        thinkState.thinkFragmentIds.remove("-1");
                         // RESPONSE fragment may have "content" or "text" field
                         String fragText = frag.path("content").asText(frag.path("text").asText(""));
                         if (!fragText.isEmpty()) {
@@ -712,7 +705,7 @@ public class ChatRuntimeService {
                 }
                 // Return thinking content first, then text content
                 if (thinkingBuilder.length() > 0) {
-                    return createThinkingDelta(thinkingBuilder.toString());
+                    return createThinkingDelta(thinkingBuilder.toString(), thinkState);
                 }
                 if (textBuilder.length() > 0) {
                     return new InternalStreamEvent.TextDelta(textBuilder.toString());
@@ -739,8 +732,8 @@ public class ChatRuntimeService {
             if (path == null && value.isTextual()) {
                 String text = value.asText();
                 if (!text.isEmpty()) {
-                    if (inThinkFragment) {
-                        return createThinkingDelta(text);
+                    if (thinkState.inThinkFragment) {
+                        return createThinkingDelta(text, thinkState);
                     }
                     return new InternalStreamEvent.TextDelta(text);
                 }
@@ -761,9 +754,9 @@ public class ChatRuntimeService {
 
                         if ("THINK".equals(type)) {
                             if (fragIdStr != null) {
-                                thinkFragmentIds.add(fragIdStr);
-                                thinkFragmentIds.add("-1"); // -1 means "last fragment" in subsequent APPEND ops
-                                inThinkFragment = true;
+                                thinkState.thinkFragmentIds.add(fragIdStr);
+                                thinkState.thinkFragmentIds.add("-1"); // -1 means "last fragment" in subsequent APPEND ops
+                                thinkState.inThinkFragment = true;
                                 log.debug("[parseUpstreamChunk] Registered THINK fragment id={} and -1 from initial response", fragIdStr);
                             }
                             String fragText = frag.path("content").asText("");
@@ -772,7 +765,7 @@ public class ChatRuntimeService {
                             }
                         } else if ("RESPONSE".equals(type)) {
                             // Switch out of think mode for RESPONSE
-                            exitThinkMode();
+                            exitThinkMode(thinkState);
                             String fragText = frag.path("content").asText(frag.path("text").asText(""));
                             if (!fragText.isEmpty()) {
                                 textBuilder.append(fragText);
@@ -780,7 +773,7 @@ public class ChatRuntimeService {
                         }
                     }
                     if (thinkingBuilder.length() > 0) {
-                        return createThinkingDelta(thinkingBuilder.toString());
+                        return createThinkingDelta(thinkingBuilder.toString(), thinkState);
                     }
                     if (textBuilder.length() > 0) {
                         return new InternalStreamEvent.TextDelta(textBuilder.toString());
@@ -816,31 +809,22 @@ public class ChatRuntimeService {
     }
 
     /**
-     * Clear tracked THINK fragment IDs. Called when a new request starts.
-     */
-    public void clearThinkFragmentIds() {
-        thinkFragmentIds.clear();
-        inThinkFragment = false;
-        thinkingAccumulator.setLength(0);
-    }
-
-    /**
      * Log the accumulated thinking content when thinking phase ends.
      */
-    private void logThinkingComplete() {
-        if (thinkingAccumulator.length() > 0) {
+    private void logThinkingComplete(ThinkState thinkState) {
+        if (thinkState.thinkingAccumulator.length() > 0) {
             log.info("[Thinking] Complete thinking content ({} chars):\n{}",
-                thinkingAccumulator.length(), thinkingAccumulator.toString());
-            thinkingAccumulator.setLength(0);
+                thinkState.thinkingAccumulator.length(), thinkState.thinkingAccumulator.toString());
+            thinkState.thinkingAccumulator.setLength(0);
         }
     }
 
     /**
      * Create a ThinkingDelta and accumulate content for logging.
      */
-    private InternalStreamEvent.ThinkingDelta createThinkingDelta(String text) {
+    private InternalStreamEvent.ThinkingDelta createThinkingDelta(String text, ThinkState thinkState) {
         if (text != null && !text.isEmpty()) {
-            thinkingAccumulator.append(text);
+            thinkState.thinkingAccumulator.append(text);
         }
         return new InternalStreamEvent.ThinkingDelta(text);
     }
@@ -848,10 +832,10 @@ public class ChatRuntimeService {
     /**
      * Switch out of think mode and log accumulated thinking content.
      */
-    private void exitThinkMode() {
-        if (inThinkFragment) {
-            inThinkFragment = false;
-            logThinkingComplete();
+    private void exitThinkMode(ThinkState thinkState) {
+        if (thinkState.inThinkFragment) {
+            thinkState.inThinkFragment = false;
+            logThinkingComplete(thinkState);
         }
     }
 
