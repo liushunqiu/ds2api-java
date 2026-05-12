@@ -159,9 +159,11 @@ public class AccountPoolManager {
                                 })
                                 .onErrorResume(e -> {
                                     log.error("[Pool] Login failed for {}: {}", accountId, e.getMessage());
-                                    return Mono.empty();
+                                    return Mono.error(new IllegalStateException(
+                                            "Login failed for " + accountId + ": " + e.getMessage()));
                                 });
                     }
+                    log.info("[Pool] Using cached token for {}", accountId);
                     return Mono.just(acc.getToken());
                 })
                 .orElse(Mono.empty());

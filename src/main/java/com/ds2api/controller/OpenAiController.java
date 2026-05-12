@@ -155,7 +155,10 @@ public class OpenAiController {
                 AuthInfo authInfo = ApiAuthFilter.getAuthInfo(exchange);
 
                 Flux<InternalStreamEvent> stream = runtime.execute(resolved, authInfo)
-                    .doOnNext(buffer::add)
+                    .doOnNext(event -> {
+                        buffer.add(event);
+                        log.debug("Response [{}] buffered event: {}", respId, event);
+                    })
                     .doOnComplete(() -> {
                         log.debug("Response [{}] completed, caching {} events", respId, buffer.size());
                         responseCache.cache(respId, buffer);

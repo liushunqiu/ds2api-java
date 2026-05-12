@@ -42,7 +42,8 @@ public class DeepSeekSessionCacheService {
      */
     public record SessionInfo(
         String chatSessionId,
-        Integer lastResponseMessageId
+        Integer lastResponseMessageId,
+        String accountIdentifier
     ) {}
 
     private record SessionEntry(SessionInfo info, long createdAtMillis) {}
@@ -72,16 +73,17 @@ public class DeepSeekSessionCacheService {
      * @param conversationId external conversation identifier
      * @param chatSessionId DeepSeek chat_session_id
      * @param responseMessageId last response_message_id from SSE stream
+     * @param accountIdentifier the account that owns this session (email or mobile)
      */
-    public void put(String conversationId, String chatSessionId, Integer responseMessageId) {
+    public void put(String conversationId, String chatSessionId, Integer responseMessageId, String accountIdentifier) {
         if (conversationId == null || chatSessionId == null) return;
 
-        SessionInfo info = new SessionInfo(chatSessionId, responseMessageId);
+        SessionInfo info = new SessionInfo(chatSessionId, responseMessageId, accountIdentifier);
         SessionEntry entry = new SessionEntry(info, System.currentTimeMillis());
         cache.put(conversationId, entry);
 
-        log.debug("[SessionCache] Stored session for conversation={}, chatSessionId={}, responseMessageId={}",
-                conversationId, chatSessionId, responseMessageId);
+        log.debug("[SessionCache] Stored session for conversation={}, chatSessionId={}, responseMessageId={}, account={}",
+                conversationId, chatSessionId, responseMessageId, accountIdentifier);
     }
 
     /**
@@ -100,7 +102,8 @@ public class DeepSeekSessionCacheService {
 
         SessionInfo updatedInfo = new SessionInfo(
                 existing.info().chatSessionId(),
-                responseMessageId
+                responseMessageId,
+                existing.info().accountIdentifier()
         );
         SessionEntry updatedEntry = new SessionEntry(updatedInfo, existing.createdAtMillis());
         cache.put(conversationId, updatedEntry);

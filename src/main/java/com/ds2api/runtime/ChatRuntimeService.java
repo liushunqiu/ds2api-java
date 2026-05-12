@@ -123,9 +123,12 @@ public class ChatRuntimeService {
         ToolCallStreamParser toolParser = new ToolCallStreamParser();
         Ds2Config config = configLoader.getConfig();
 
+        log.info("[{}] execute() called, authInfo={}, model={}", requestId,
+            authInfo != null ? authInfo.mode() : "null", request.model());
+
         // Check for session continuation via conversation_id
         String conversationId = request.conversationId();
-        log.debug("[{}] ConversationId from request: '{}'", requestId, conversationId);
+        log.info("[{}] ConversationId from request: '{}'", requestId, conversationId);
         DeepSeekSessionCacheService.SessionInfo cachedSession = null;
         boolean isContinuation = false;
 
@@ -133,19 +136,25 @@ public class ChatRuntimeService {
             cachedSession = sessionCache.get(conversationId);
             if (cachedSession != null) {
                 isContinuation = true;
-                log.debug("[{}] Session continuation: conversationId={}, chatSessionId={}, lastResponseMessageId={}",
-                        requestId, conversationId, cachedSession.chatSessionId(), cachedSession.lastResponseMessageId());
+                log.info("[{}] Session continuation: conversationId={}, chatSessionId={}, lastResponseMessageId={}, cachedAccount={}",
+                        requestId, conversationId, cachedSession.chatSessionId(), cachedSession.lastResponseMessageId(),
+                        cachedSession.accountIdentifier());
             }
         }
 
         final DeepSeekSessionCacheService.SessionInfo sessionToUse = cachedSession;
         final boolean continueSession = isContinuation;
 
+        // For continuation, use the cached account identifier to ensure same account
+        if (continueSession && sessionToUse.accountIdentifier() != null) {
+            log.info("[{}] Forcing targetAccount={} for session continuation", requestId, sessionToUse.accountIdentifier());
+        }
+
         // DIRECT mode: use raw token, no pool
         if (authInfo != null && authInfo.mode() == AuthInfo.Mode.DIRECT) {
             String directToken = authInfo.effectiveToken();
-            log.debug("[{}] DIRECT mode, token={}...", requestId,
-                directToken.length() > 8 ? directToken.substring(0, 8) : directToken);
+            log.info("[{}] DIRECT mode, token={}..., isContinuation={}", requestId,
+                directToken.length() > 8 ? directToken.substring(0, 8) : directToken, continueSession);
 
             // P1: apply prompt compat (sync), no history split for DIRECT mode
             InternalRequest compatReq = promptCompat.applyCompat(request);
@@ -155,11 +164,16 @@ public class ChatRuntimeService {
                 ? Mono.just(sessionToUse.chatSessionId())
                 : sessionClient.createSession(directToken);
 
-            return sessionMono.flatMapMany(sessionId -> {
+            return sessionMono
+                .doOnNext(sid -> log.info("[{}] Session obtained: {}", requestId, sid))
+                .doOnError(e -> log.error("[{}] Session creation failed: {}", requestId, e.getMessage()))
+                .flatMapMany(sessionId -> {
                 Integer parentMessageId = continueSession ? sessionToUse.lastResponseMessageId() : null;
+                log.info("[{}] DIRECT mode: sessionId={}, parentMessageId={}, isContinuation={}",
+                    requestId, sessionId, parentMessageId, continueSession);
                 ObjectNode payload = buildUpstreamPayload(compatReq, sessionId, parentMessageId, continueSession);
 
-                return callUpstreamDirect(payload, directToken, requestId, toolParser, sessionId, conversationId)
+                return callUpstreamDirect(payload, directToken, requestId, toolParser, sessionId, conversationId, "DIRECT")
                     .doFinally(signal -> {
                         toolParser.flushAndReset();
                         toolParser.reset();
@@ -172,13 +186,20 @@ public class ChatRuntimeService {
         }
 
         // MANAGED mode: acquire pool slot, resolve token, apply P1 pipeline
-        String targetAccount = authInfo != null ? authInfo.targetAccount() : null;
-        if (targetAccount != null) {
-            log.debug("[{}] MANAGED target={}", requestId, targetAccount);
-        }
+        // For continuation, force the same account that created the session
+        String targetAccount = continueSession && sessionToUse.accountIdentifier() != null
+            ? sessionToUse.accountIdentifier()
+            : (authInfo != null ? authInfo.targetAccount() : null);
+        log.info("[{}] MANAGED mode, targetAccount={}", requestId, targetAccount);
 
         return poolManager.acquire(targetAccount)
+            .doOnNext(lease -> log.info("[{}] Pool lease acquired: {}", requestId, lease.accountIdentifier()))
+            .doOnError(e -> log.error("[{}] Pool acquire failed: {}", requestId, e.getMessage()))
             .flatMapMany(lease -> poolManager.resolveToken(lease.accountIdentifier())
+                .doOnError(e -> {
+                    log.error("[{}] resolveToken failed, releasing lease: {}", requestId, e.getMessage());
+                    lease.release();
+                })
                 .flatMapMany(token -> {
                     if (token == null || token.isBlank()) {
                         return Flux.<InternalStreamEvent>error(
@@ -197,11 +218,13 @@ public class ChatRuntimeService {
 
                     return sessionMono.flatMapMany(sessionId -> {
                         Integer parentMessageId = continueSession ? sessionToUse.lastResponseMessageId() : null;
+                        log.info("[{}] Session created/continued: sessionId={}, parentMessageId={}, isContinuation={}",
+                            requestId, sessionId, parentMessageId, continueSession);
 
                         return historySplitter.applySplit(compatReq, token)
                             .flatMapMany(splitReq -> {
                                 ObjectNode payload = buildUpstreamPayload(splitReq, sessionId, parentMessageId, continueSession);
-                                return callUpstreamWithToken(payload, token, lease, requestId, toolParser, sessionId, conversationId)
+                                return callUpstreamWithToken(payload, token, lease, requestId, toolParser, sessionId, conversationId, lease.accountIdentifier())
                                     .doFinally(signal -> {
                                         toolParser.flushAndReset();
                                         toolParser.reset();
@@ -215,7 +238,12 @@ public class ChatRuntimeService {
                                     });
                             });
                     });
-                }));
+                }))
+            .onErrorResume(e -> {
+                log.error("[{}] execute() top-level error: {}", requestId, e.getMessage(), e);
+                return Flux.just(new InternalStreamEvent.Error(
+                    "Execute error: " + e.getMessage(), 500));
+            });
     }
 
     /**
@@ -226,8 +254,9 @@ public class ChatRuntimeService {
                                                              String requestId,
                                                              ToolCallStreamParser toolParser,
                                                              String sessionId,
-                                                             String conversationId) {
-        return doUpstreamCall(payload, token, requestId, toolParser, sessionId, conversationId)
+                                                             String conversationId,
+                                                             String accountIdentifier) {
+        return doUpstreamCall(payload, token, requestId, toolParser, sessionId, conversationId, accountIdentifier)
             .onErrorResume(e -> {
                 if (isAuthError(e)) {
                     log.info("[{}] 401 on {}, attempting token refresh", requestId,
@@ -236,7 +265,7 @@ public class ChatRuntimeService {
                         .refreshIfNeeded(lease.accountIdentifier(), e)
                         .flatMapMany(newToken -> {
                             log.info("[{}] Token refreshed, retrying upstream", requestId);
-                            return doUpstreamCall(payload, newToken, requestId, toolParser, sessionId, conversationId);
+                            return doUpstreamCall(payload, newToken, requestId, toolParser, sessionId, conversationId, accountIdentifier);
                         })
                         .onErrorResume(retryErr -> {
                             log.error("[{}] Retry after refresh also failed: {}",
@@ -257,8 +286,9 @@ public class ChatRuntimeService {
                                                           String requestId,
                                                           ToolCallStreamParser toolParser,
                                                           String sessionId,
-                                                          String conversationId) {
-        return doUpstreamCall(payload, token, requestId, toolParser, sessionId, conversationId);
+                                                          String conversationId,
+                                                          String accountIdentifier) {
+        return doUpstreamCall(payload, token, requestId, toolParser, sessionId, conversationId, accountIdentifier);
     }
 
     /**
@@ -273,16 +303,20 @@ public class ChatRuntimeService {
                                                        String requestId,
                                                        ToolCallStreamParser toolParser,
                                                        String sessionId,
-                                                       String conversationId) {
+                                                       String conversationId,
+                                                       String accountIdentifier) {
         // Clear THINK fragment tracking for new request
         clearThinkFragmentIds();
 
         String payloadStr = payload.toString(); // cached for packet capture
         log.info("[{}] Upstream payload: {}", requestId, payloadStr);
+        log.info("[{}] doUpstreamCall started, token={}...", requestId,
+            token.length() > 8 ? token.substring(0, 8) : token);
 
         // Proactively get PoW token before sending completion request (aligned with Go reference)
         return powClient.getPowToken(token)
-            .doOnNext(powToken -> log.debug("[{}] PoW token acquired", requestId))
+            .doOnNext(powToken -> log.info("[{}] PoW token acquired: {}...", requestId,
+                powToken.length() > 20 ? powToken.substring(0, 20) : powToken))
             .flatMapMany(powToken -> {
                 log.info("[{}] Sending completion: token={}..., powToken={}..., payloadSize={}",
                     requestId,
@@ -306,12 +340,22 @@ public class ChatRuntimeService {
                     }
                     return resp.bodyToFlux(String.class)
                         .doOnNext(raw -> {
-                            log.debug("[{}] Raw upstream chunk: {}", requestId, raw);
+                            log.info("[{}] Raw upstream chunk: {}", requestId, raw);
                             log.debug("[{}] Calling extractAndCacheResponseMessageIdFromChunk with conversationId='{}', sessionId='{}'", requestId, conversationId, sessionId);
-                            extractAndCacheResponseMessageIdFromChunk(raw, conversationId, sessionId);
+                            extractAndCacheResponseMessageIdFromChunk(raw, conversationId, sessionId, accountIdentifier);
                         })
-                        .map(this::parseUpstreamChunk)
-                        .filter(event -> !(event instanceof InternalStreamEvent.TextDelta td) || !td.chunk().isEmpty())
+                        .map(raw -> {
+                            InternalStreamEvent event = parseUpstreamChunk(raw);
+                            log.info("[{}] Parse upstream chunk result: {}", requestId, event);
+                            return event;
+                        })
+                        .filter(event -> {
+                            boolean keep = !(event instanceof InternalStreamEvent.TextDelta td) || !td.chunk().isEmpty();
+                            if (!keep) {
+                                log.debug("[{}] Filtered out empty TextDelta", requestId);
+                            }
+                            return keep;
+                        })
                         .doOnNext(event -> log.debug("[{}] Parsed event: {}", requestId, event))
                         .concatMap(event -> {
                             if (event instanceof InternalStreamEvent.TextDelta td && !td.chunk().isEmpty()) {
@@ -363,9 +407,9 @@ public class ChatRuntimeService {
      * Extract response_message_id from the ready event in SSE chunks and cache it.
      * The ready event format: {"request_message_id":1,"response_message_id":2,"model_type":"expert"}
      */
-    private void extractAndCacheResponseMessageId(List<String> chunks, String conversationId, String sessionId) {
+    private void extractAndCacheResponseMessageId(List<String> chunks, String conversationId, String sessionId, String accountIdentifier) {
         for (String chunk : chunks) {
-            extractAndCacheResponseMessageIdFromChunk(chunk, conversationId, sessionId);
+            extractAndCacheResponseMessageIdFromChunk(chunk, conversationId, sessionId, accountIdentifier);
         }
     }
 
@@ -373,7 +417,7 @@ public class ChatRuntimeService {
      * Extract response_message_id from a single SSE chunk and cache it.
      * The ready event format: {"request_message_id":1,"response_message_id":2,"model_type":"expert"}
      */
-    private void extractAndCacheResponseMessageIdFromChunk(String chunk, String conversationId, String sessionId) {
+    private void extractAndCacheResponseMessageIdFromChunk(String chunk, String conversationId, String sessionId, String accountIdentifier) {
         if (conversationId == null || conversationId.isBlank()) return;
 
         String trimmed = chunk.trim();
@@ -390,7 +434,7 @@ public class ChatRuntimeService {
                     if (sessionCache.contains(conversationId)) {
                         sessionCache.updateResponseMessageId(conversationId, responseMessageId);
                     } else {
-                        sessionCache.put(conversationId, sessionId, responseMessageId);
+                        sessionCache.put(conversationId, sessionId, responseMessageId, accountIdentifier);
                     }
                     log.debug("[Session] Cached response_message_id={} for conversation={}",
                             responseMessageId, conversationId);
