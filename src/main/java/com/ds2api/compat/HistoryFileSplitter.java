@@ -44,29 +44,8 @@ public class HistoryFileSplitter {
      * @return Mono with potentially transformed request
      */
     public Mono<InternalRequest> applySplit(InternalRequest req, String accountToken) {
-        Ds2Config config = configLoader.getConfig();
-        Ds2Config.CurrentInputFileConfig cif = config.getCurrentInputFile();
-
-        if (!cif.isEnabled()) {
-            return Mono.just(req);
-        }
-
-        int threshold = cif.getThreshold();
-        int totalChars = req.messages().stream()
-            .mapToInt(m -> m.content() != null ? m.content().length() : 0)
-            .sum();
-
-        // threshold <= 0 means always trigger; >0 triggers only above the threshold
-        if (threshold > 0 && totalChars < threshold) {
-            return Mono.just(req);
-        }
-        if (req.messages().size() <= 1) {
-            return Mono.just(req); // single-turn: nothing to split
-        }
-
-        log.info("[Split] Context length={}, threshold={}, triggering history file upload",
-            totalChars, threshold);
-        return splitAndUpload(req, accountToken);
+        // Disabled: file upload on every request is not needed
+        return Mono.just(req);
     }
 
     private Mono<InternalRequest> splitAndUpload(InternalRequest req, String accountToken) {

@@ -24,7 +24,7 @@ management:
 
 logging:
   level:
-    com.ds2api: ${DS2API_LOG_LEVEL:INFO}
+    com.ds2api: ${DS2API_LOG_LEVEL:DEBUG}
     org.springframework.web: INFO
 
 ds2api:

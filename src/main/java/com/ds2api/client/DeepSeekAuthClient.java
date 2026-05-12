@@ -32,6 +32,14 @@ public class DeepSeekAuthClient {
         this.mapper = mapper;
         this.authWebClient = webClientBuilder
                 .baseUrl("https://chat.deepseek.com")
+                .defaultHeader("Host", "chat.deepseek.com")
+                .defaultHeader("Accept", "application/json")
+                .defaultHeader("Content-Type", "application/json")
+                .defaultHeader("accept-charset", "UTF-8")
+                .defaultHeader("User-Agent", "DeepSeek/2.0.4 Android/35")
+                .defaultHeader("x-client-platform", "android")
+                .defaultHeader("x-client-version", "2.0.4")
+                .defaultHeader("x-client-locale", "zh_CN")
                 .build();
     }
 
@@ -57,29 +65,35 @@ public class DeepSeekAuthClient {
                     "Email or mobile must be provided for login"));
         }
         payload.put("password", password);
+        payload.put("device_id", "deepseek_to_api");
+        payload.put("os", "android");
 
         log.debug("[DeepSeekAuth] Login attempt for {}",
                 email != null ? email : mobile);
 
         return authWebClient.post()
-                .uri("/api/v1/users/login")
-                .header("Content-Type", "application/json")
-                .header("User-Agent",
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .uri("/api/v0/users/login")
                 .bodyValue(payload)
                 .retrieve()
                 .onStatus(HttpStatusCode::is4xxClientError, resp ->
-                        resp.bodyToMono(JsonNode.class).flatMap(body -> {
-                            String msg = body.path("msg").asText("Unknown auth error");
-                            int code = body.path("code").asInt(-1);
-                            log.warn("[DeepSeekAuth] Login 4xx: code={} msg={}", code, msg);
-                            if (code == 40002 || msg.contains("captcha") || msg.contains("verify")) {
+                        resp.bodyToMono(String.class).flatMap(bodyStr -> {
+                            log.warn("[DeepSeekAuth] Login 4xx raw response: {}", bodyStr);
+                            try {
+                                JsonNode body = mapper.readTree(bodyStr);
+                                String msg = body.path("msg").asText("Unknown auth error");
+                                int code = body.path("code").asInt(-1);
+                                log.warn("[DeepSeekAuth] Login 4xx: code={} msg={}", code, msg);
+                                if (code == 40002 || msg.contains("captcha") || msg.contains("verify")) {
+                                    return Mono.error(new RuntimeException(
+                                            "DeepSeek requires captcha/verification. Manual login needed. "
+                                                    + "(code:" + code + " msg:" + msg + ")"));
+                                }
                                 return Mono.error(new RuntimeException(
-                                        "DeepSeek requires captcha/verification. Manual login needed. "
-                                                + "(code:" + code + " msg:" + msg + ")"));
+                                        "Login failed: " + msg + " (code:" + code + ")"));
+                            } catch (Exception e) {
+                                return Mono.error(new RuntimeException(
+                                        "Login failed with 4xx: " + bodyStr));
                             }
-                            return Mono.error(new RuntimeException(
-                                    "Login failed: " + msg + " (code:" + code + ")"));
                         }))
                 .bodyToMono(JsonNode.class)
                 .map(this::extractToken)
@@ -88,13 +102,29 @@ public class DeepSeekAuthClient {
 
     /**
      * Flexibly extract token from login response.
-     * Supports: { "data": { "token": "..." } } and { "token": "..." }
+     * Supports nested format: { "data": { "biz_data": { "user": { "token": "..." } } } }
      */
     private String extractToken(JsonNode resp) {
         JsonNode data = resp.path("data");
-        String token = data.isMissingNode()
-                ? resp.path("token").asText(null)
-                : data.path("token").asText(null);
+        // Check biz_code first
+        int bizCode = data.path("biz_code").asInt(0);
+        if (bizCode != 0) {
+            String bizMsg = data.path("biz_msg").asText("Unknown error");
+            log.error("[DeepSeekAuth] Login biz error: biz_code={} biz_msg={}", bizCode, bizMsg);
+            throw new RuntimeException("Login failed: " + bizMsg);
+        }
+        // Try nested format: data.biz_data.user.token
+        JsonNode bizData = data.path("biz_data");
+        JsonNode user = bizData.path("user");
+        String token = user.path("token").asText(null);
+        if (token == null || token.isBlank()) {
+            // Fallback: data.token
+            token = data.path("token").asText(null);
+        }
+        if (token == null || token.isBlank()) {
+            // Fallback: root token
+            token = resp.path("token").asText(null);
+        }
         if (token == null || token.isBlank()) {
             log.error("[DeepSeekAuth] Token not found in response: {}", resp);
             throw new RuntimeException("Token not found in login response");

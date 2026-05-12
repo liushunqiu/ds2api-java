@@ -1,5 +1,6 @@
 package com.ds2api.pool;
 
+import com.ds2api.client.DeepSeekAuthClient;
 import com.ds2api.config.ConfigLoaderService;
 import com.ds2api.config.ConfigReloadedEvent;
 import com.ds2api.config.Ds2Config;
@@ -33,12 +34,14 @@ public class AccountPoolManager {
     private static final Logger log = LoggerFactory.getLogger(AccountPoolManager.class);
 
     private final ConfigLoaderService configLoader;
+    private final DeepSeekAuthClient authClient;
     private final Map<String, AccountSlotManager> slotManagers = new ConcurrentHashMap<>();
     private final List<String> accountIds = new CopyOnWriteArrayList<>();
     private final AtomicInteger roundRobinIndex = new AtomicInteger(0);
 
-    public AccountPoolManager(ConfigLoaderService configLoader) {
+    public AccountPoolManager(ConfigLoaderService configLoader, DeepSeekAuthClient authClient) {
         this.configLoader = configLoader;
+        this.authClient = authClient;
     }
 
     @PostConstruct
@@ -73,10 +76,6 @@ public class AccountPoolManager {
             String id = resolveIdentifier(acc);
             if (id == null) {
                 log.warn("[Pool] Skipping account with no email/mobile");
-                continue;
-            }
-            if (acc.getToken() == null || acc.getToken().isBlank()) {
-                log.warn("[Pool] Skipping account {} with no token", id);
                 continue;
             }
             newManagers.put(id, new AccountSlotManager(id, maxInflight, maxQueue));
@@ -143,14 +142,29 @@ public class AccountPoolManager {
 
     /**
      * Resolve the token for a given account identifier.
+     * If token is missing, attempts auto-login asynchronously.
      */
-    public String resolveToken(String accountId) {
+    public Mono<String> resolveToken(String accountId) {
         Ds2Config config = configLoader.getConfig();
         return config.getAccounts().stream()
                 .filter(a -> accountId.equals(resolveIdentifier(a)))
-                .map(Ds2Config.Account::getToken)
                 .findFirst()
-                .orElse(null);
+                .map(acc -> {
+                    if (acc.getToken() == null || acc.getToken().isBlank()) {
+                        log.info("[Pool] Token missing for {}, attempting login...", accountId);
+                        return authClient.login(acc.getEmail(), acc.getMobile(), acc.getPassword(), "86")
+                                .doOnNext(token -> {
+                                    acc.setToken(token);
+                                    log.info("[Pool] Login successful for {}", accountId);
+                                })
+                                .onErrorResume(e -> {
+                                    log.error("[Pool] Login failed for {}: {}", accountId, e.getMessage());
+                                    return Mono.empty();
+                                });
+                    }
+                    return Mono.just(acc.getToken());
+                })
+                .orElse(Mono.empty());
     }
 
     /**

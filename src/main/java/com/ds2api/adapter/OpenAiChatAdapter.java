@@ -40,6 +40,12 @@ public class OpenAiChatAdapter implements ProtocolAdapter {
         boolean stream = body.path("stream").asBoolean(true);
         String toolChoice = body.path("tool_choice").asText("auto");
 
+        // 支持从请求体获取 conversation_id 用于session续接
+        String conversationId = null;
+        if (body.has("conversation_id")) {
+            conversationId = body.get("conversation_id").asText(null);
+        }
+
         List<InternalRequest.Message> messages;
         JsonNode msgsNode = body.path("messages");
         if (msgsNode.isArray()) {
@@ -68,7 +74,8 @@ public class OpenAiChatAdapter implements ProtocolAdapter {
         }
 
         JsonNode tools = body.path("tools");
-        return Mono.just(new InternalRequest(model, messages, stream, tools, toolChoice));
+        var passThrough = InternalRequest.extractPassThrough(body);
+        return Mono.just(new InternalRequest(model, messages, stream, tools, toolChoice, conversationId, passThrough));
     }
 
     @Override
@@ -121,13 +128,28 @@ public class OpenAiChatAdapter implements ProtocolAdapter {
         ObjectNode choice = choices.addObject().put("index", 0);
         ObjectNode delta = choice.putObject("delta");
 
-        if (event instanceof InternalStreamEvent.TextDelta t) {
+        if (event instanceof InternalStreamEvent.ThinkingDelta td) {
+            // Handle thinking/reasoning delta - emit as reasoning_content
+            if (!state.firstChunkSent()) {
+                delta.put("role", "assistant");
+                state.markFirstChunk();
+            }
+            delta.put("reasoning_content", td.chunk());
+            choice.putNull("finish_reason");
+            out.add(sse("chat.completion.chunk", chunk));
+        } else if (event instanceof InternalStreamEvent.TextDelta t) {
             state.appendCompletionText(t.chunk());
+            if (!state.firstChunkSent()) {
+                delta.put("role", "assistant");
+                state.markFirstChunk();
+            }
             delta.put("content", t.chunk());
             choice.putNull("finish_reason");
             out.add(sse("chat.completion.chunk", chunk));
         } else if (event instanceof InternalStreamEvent.ToolCallStart s) {
-            int idx = state.registerToolCall(s.callId());
+            // Use toolIndex from parser directly
+            int idx = s.toolIndex();
+            state.registerToolCall(s.callId(), idx);
             ObjectNode tc = delta.putArray("tool_calls").addObject();
             tc.put("index", idx);
             tc.put("id", s.callId());
@@ -136,18 +158,20 @@ public class OpenAiChatAdapter implements ProtocolAdapter {
             choice.putNull("finish_reason");
             out.add(sse("chat.completion.chunk", chunk));
         } else if (event instanceof InternalStreamEvent.ToolCallDelta d) {
-            Integer idx = state.getToolCallIndex(d.callId());
-            if (idx != null) {
-                ObjectNode tc = delta.putArray("tool_calls").addObject();
-                tc.put("index", idx);
-                tc.putObject("function").put("arguments", d.argumentsDelta());
-                choice.putNull("finish_reason");
-                out.add(sse("chat.completion.chunk", chunk));
-            }
+            // Send arguments delta directly
+            int idx = d.toolIndex();
+            ObjectNode tc = delta.putArray("tool_calls").addObject();
+            tc.put("index", idx);
+            tc.putObject("function").put("arguments", d.argumentsDelta());
+            choice.putNull("finish_reason");
+            out.add(sse("chat.completion.chunk", chunk));
         } else if (event instanceof InternalStreamEvent.ToolCallEnd e) {
             // OpenAI Chat streaming does not emit an end event per tool
         } else if (event instanceof InternalStreamEvent.Finish f) {
-            choice.put("finish_reason", f.reason().equals("tool_calls") ? "tool_calls" : "stop");
+            // If we detected tool calls during streaming, use "tool_calls" as finish_reason
+            String reason = state.hasToolCalls() ? "tool_calls" : 
+                           (f.reason().equals("tool_calls") ? "tool_calls" : "stop");
+            choice.put("finish_reason", reason);
             // P2: inject usage in final chunk (OpenAI allows this)
             UsageCalculator.Usage usage = state.calculateUsage();
             chunk.putObject("usage")
@@ -232,7 +256,8 @@ public class OpenAiChatAdapter implements ProtocolAdapter {
     private ServerSentEvent<String> sse(String eventType, Object data) {
         try {
             String json = (data instanceof String s) ? s : mapper.writeValueAsString(data);
-            return ServerSentEvent.builder(json).event(eventType).build();
+            // OpenAI Chat Completions spec: bare data: lines, NO event: field
+            return ServerSentEvent.builder(json).build();
         } catch (Exception e) {
             throw new RuntimeException("SSE serialize error", e);
         }
@@ -241,16 +266,23 @@ public class OpenAiChatAdapter implements ProtocolAdapter {
     /** Per-subscription state machine -- no shared mutable state across requests. */
     private static class ChatStreamState {
         private final Map<String, Integer> toolCallIndices = new HashMap<>();
-        private final AtomicInteger nextIndex = new AtomicInteger(0);
         private final String promptText;
         private final StringBuilder completionText = new StringBuilder();
+        private boolean firstChunkSent = false;
 
         ChatStreamState(String promptText) {
             this.promptText = promptText;
         }
 
-        int registerToolCall(String callId) {
-            return toolCallIndices.computeIfAbsent(callId, k -> nextIndex.getAndIncrement());
+        boolean firstChunkSent() { return firstChunkSent; }
+        void markFirstChunk() { firstChunkSent = true; }
+
+        void registerToolCall(String callId, int index) {
+            toolCallIndices.put(callId, index);
+        }
+
+        boolean hasToolCalls() {
+            return !toolCallIndices.isEmpty();
         }
 
         Integer getToolCallIndex(String callId) {

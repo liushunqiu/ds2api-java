@@ -41,8 +41,16 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
     public Mono<InternalRequest> normalizeRequest(JsonNode body) {
         String model = body.path("model").asText(InternalRequest.DEFAULT_MODEL);
         String toolChoice = body.path("tool_choice").asText("auto");
+
+        // Support conversation_id for session continuation
+        String conversationId = null;
+        if (body.has("conversation_id")) {
+            conversationId = body.get("conversation_id").asText(null);
+        }
+
         List<InternalRequest.Message> messages = extractInputMessages(body);
-        return Mono.just(new InternalRequest(model, messages, true, body.path("tools"), toolChoice));
+        var passThrough = InternalRequest.extractPassThrough(body);
+        return Mono.just(new InternalRequest(model, messages, true, body.path("tools"), toolChoice, conversationId, passThrough));
     }
 
     private List<InternalRequest.Message> extractInputMessages(JsonNode body) {
@@ -79,13 +87,14 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
                                                 String responseId, boolean stream) {
         long createdAt = Instant.now().getEpochSecond();
 
-        // 1. Mandatory first frame: response.created
         ServerSentEvent<String> createdEvent = sse("response.created", Map.of(
             "type", "response.created",
             "response", Map.of(
                 "id", responseId,
+                "object", "response",
                 "status", "in_progress",
-                "created_at", createdAt
+                "created_at", createdAt,
+                "model", request.model()
             )
         ));
 
@@ -94,25 +103,92 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
         Flux<ServerSentEvent<String>> bodyEvents = events.concatMap(
             event -> convertResponseEvent(event, responseId, state));
 
-        // 2. Terminal frame: response.completed or response.failed
-        Flux<ServerSentEvent<String>> tailEvent = Mono.fromSupplier(() -> {
-            boolean isRequired = "required".equalsIgnoreCase(request.toolChoice());
-            boolean hasToolCall = state.hasAnyToolCall();
+        // Terminal: text.done, part.done, output_item.done, completed
+        Flux<ServerSentEvent<String>> tailEvents = Mono.fromSupplier(() -> {
+            List<ServerSentEvent<String>> tail = new ArrayList<>();
 
-            if (isRequired && !hasToolCall) {
-                return sse("response.failed", Map.of(
+            boolean isRequired = "required".equalsIgnoreCase(request.toolChoice());
+            if (isRequired && !state.hasAnyToolCall()) {
+                tail.add(sse("response.failed", Map.of(
                     "type", "response.failed",
                     "response_id", responseId,
                     "error", Map.of("message", "tool_choice=required but no tool call was generated", "code", 422)
-                ));
+                )));
+                return tail;
             }
-            return sse("response.completed", Map.of(
-                "type", "response.completed",
-                "response", Map.of("id", responseId, "status", "completed")
-            ));
-        }).flux();
 
-        return Flux.concat(Flux.just(createdEvent), bodyEvents, tailEvent);
+            // Close reasoning item if it was created but not closed
+            if (state.isReasoningItemCreated() && !state.isReasoningItemClosed()) {
+                String finalReasoning = state.getAccumulatedReasoning();
+                tail.add(sse("response.reasoning_summary_text.done", Map.of(
+                    "type", "response.reasoning_summary_text.done",
+                    "item_id", "reasoning_0",
+                    "response_id", responseId,
+                    "output_index", 0,
+                    "summary_index", 0,
+                    "text", finalReasoning
+                )));
+                tail.add(sse("response.output_item.done", Map.of(
+                    "type", "response.output_item.done",
+                    "item_id", "reasoning_0",
+                    "response_id", responseId,
+                    "output_index", 0,
+                    "item", Map.of(
+                        "type", "reasoning", "id", "reasoning_0", "status", "completed",
+                        "summary", List.of(Map.of("type", "summary_text", "text", finalReasoning))
+                    )
+                )));
+                state.markReasoningItemClosed();
+            }
+
+            if (state.isTextItemCreated()) {
+                String finalText = state.getAccumulatedText();
+                int textOutputIndex = state.isReasoningItemCreated() ? 1 : 0;
+                tail.add(sse("response.output_text.done", Map.of(
+                    "type", "response.output_text.done",
+                    "item_id", "msg_0",
+                    "response_id", responseId,
+                    "output_index", textOutputIndex,
+                    "content_index", 0,
+                    "text", finalText
+                )));
+                tail.add(sse("response.content_part.done", Map.of(
+                    "type", "response.content_part.done",
+                    "item_id", "msg_0",
+                    "response_id", responseId,
+                    "output_index", textOutputIndex,
+                    "content_index", 0,
+                    "part", Map.of("type", "output_text", "text", finalText)
+                )));
+                tail.add(sse("response.output_item.done", Map.of(
+                    "type", "response.output_item.done",
+                    "item_id", "msg_0",
+                    "response_id", responseId,
+                    "output_index", textOutputIndex,
+                    "item", Map.of(
+                        "type", "message", "id", "msg_0", "role", "assistant",
+                        "status", "completed",
+                        "content", List.of(Map.of("type", "output_text", "text", finalText))
+                    )
+                )));
+            }
+
+            tail.add(sse("response.completed", Map.of(
+                "type", "response.completed",
+                "response_id", responseId,
+                "response", Map.of(
+                    "id", responseId, "object", "response", "status", "completed", "model", request.model()
+                )
+            )));
+            return tail;
+        }).flux().flatMap(Flux::fromIterable);
+
+        // [DONE] sentinel (empty data line)
+        Flux<ServerSentEvent<String>> doneEvent = Flux.just(
+            ServerSentEvent.builder((String) null).build()
+        );
+
+        return Flux.concat(Flux.just(createdEvent), bodyEvents, tailEvents, doneEvent);
     }
 
     private Flux<ServerSentEvent<String>> convertResponseEvent(InternalStreamEvent event,
@@ -120,30 +196,81 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
                                                                 ResponsesStreamState state) {
         List<ServerSentEvent<String>> out = new ArrayList<>(2);
 
-        if (event instanceof InternalStreamEvent.TextDelta t) {
+        if (event instanceof InternalStreamEvent.ThinkingDelta td) {
+            // Handle thinking/reasoning delta - emit as reasoning summary text
+            if (!state.isReasoningItemCreated()) {
+                out.add(sse("response.output_item.added", Map.of(
+                    "type", "response.output_item.added",
+                    "item_id", "reasoning_0",
+                    "response_id", respId,
+                    "output_index", 0,
+                    "item", Map.of("type", "reasoning", "status", "in_progress")
+                )));
+                state.markReasoningItemCreated();
+            }
+            state.appendReasoning(td.chunk());
+            out.add(sse("response.reasoning_summary_text.delta", Map.of(
+                "type", "response.reasoning_summary_text.delta",
+                "item_id", "reasoning_0",
+                "response_id", respId,
+                "output_index", 0,
+                "summary_index", 0,
+                "delta", td.chunk()
+            )));
+        } else if (event instanceof InternalStreamEvent.TextDelta t) {
+            // Close reasoning item if it was open
+            if (state.isReasoningItemCreated() && !state.isReasoningItemClosed()) {
+                out.add(sse("response.reasoning_summary_text.done", Map.of(
+                    "type", "response.reasoning_summary_text.done",
+                    "item_id", "reasoning_0",
+                    "response_id", respId,
+                    "output_index", 0,
+                    "summary_index", 0,
+                    "text", state.getAccumulatedReasoning()
+                )));
+                out.add(sse("response.output_item.done", Map.of(
+                    "type", "response.output_item.done",
+                    "item_id", "reasoning_0",
+                    "response_id", respId,
+                    "output_index", 0,
+                    "item", Map.of(
+                        "type", "reasoning", "id", "reasoning_0", "status", "completed",
+                        "summary", List.of(Map.of("type", "summary_text", "text", state.getAccumulatedReasoning()))
+                    )
+                )));
+                state.markReasoningItemClosed();
+            }
+
             if (!state.isTextItemCreated()) {
                 out.add(sse("response.output_item.added", Map.of(
                     "type", "response.output_item.added",
                     "item_id", "msg_0",
                     "response_id", respId,
+                    "output_index", 1,
                     "item", Map.of("type", "message", "role", "assistant", "status", "in_progress")
                 )));
                 out.add(sse("response.content_part.added", Map.of(
                     "type", "response.content_part.added",
                     "item_id", "msg_0",
                     "response_id", respId,
-                    "part", Map.of("type", "output_text")
+                    "output_index", 1,
+                    "content_index", 0,
+                    "part", Map.of("type", "output_text", "text", "")
                 )));
                 state.markTextItemCreated();
             }
-            out.add(sse("response.content_part.delta", Map.of(
-                "type", "response.content_part.delta",
+            state.appendText(t.chunk());
+            out.add(sse("response.output_text.delta", Map.of(
+                "type", "response.output_text.delta",
                 "item_id", "msg_0",
                 "response_id", respId,
+                "output_index", 1,
+                "content_index", 0,
                 "delta", t.chunk()
             )));
         } else if (event instanceof InternalStreamEvent.ToolCallStart s) {
             state.registerToolCall(s.callId());
+            state.setToolCallName(s.callId(), s.name());
             out.add(sse("response.output_item.added", Map.of(
                 "type", "response.output_item.added",
                 "item_id", s.callId(),
@@ -151,12 +278,14 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
                 "item", Map.of(
                     "type", "function_call",
                     "id", s.callId(),
+                    "call_id", s.callId(),
                     "name", s.name(),
                     "status", "in_progress"
                 )
             )));
         } else if (event instanceof InternalStreamEvent.ToolCallDelta d) {
             if (state.hasToolCall(d.callId())) {
+                state.appendToolCallArguments(d.callId(), d.argumentsDelta());
                 out.add(sse("response.function_call_arguments.delta", Map.of(
                     "type", "response.function_call_arguments.delta",
                     "item_id", d.callId(),
@@ -166,13 +295,27 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
             }
         } else if (event instanceof InternalStreamEvent.ToolCallEnd e) {
             if (state.hasToolCall(e.callId())) {
+                String callId = e.callId();
+                String name = state.getToolCallName(callId);
+                String args = state.getToolCallArguments(callId);
+                out.add(sse("response.function_call_arguments.done", Map.of(
+                    "type", "response.function_call_arguments.done",
+                    "item_id", callId,
+                    "response_id", respId,
+                    "call_id", callId,
+                    "name", name != null ? name : "",
+                    "arguments", args != null ? args : "{}"
+                )));
                 out.add(sse("response.output_item.done", Map.of(
                     "type", "response.output_item.done",
-                    "item_id", e.callId(),
+                    "item_id", callId,
                     "response_id", respId,
                     "item", Map.of(
                         "type", "function_call",
-                        "id", e.callId(),
+                        "id", callId,
+                        "call_id", callId,
+                        "name", name != null ? name : "",
+                        "arguments", args != null ? args : "{}",
                         "status", "completed"
                     )
                 )));
@@ -253,14 +396,45 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
     /** Per-subscription state machine. */
     private static class ResponsesStreamState {
         private boolean textItemCreated = false;
+        private boolean reasoningItemCreated = false;
+        private boolean reasoningItemClosed = false;
         private final Set<String> activeToolCalls = new HashSet<>();
+        private final Map<String, String> toolCallNames = new HashMap<>();
+        private final Map<String, StringBuilder> toolCallArguments = new HashMap<>();
+        private final StringBuilder accumulatedText = new StringBuilder();
+        private final StringBuilder accumulatedReasoning = new StringBuilder();
 
         void markTextItemCreated() { this.textItemCreated = true; }
         boolean isTextItemCreated() { return textItemCreated; }
-        void registerToolCall(String id) { activeToolCalls.add(id); }
-        boolean hasToolCall(String id) { return activeToolCalls.contains(id); }
+        void appendText(String chunk) { accumulatedText.append(chunk); }
+        String getAccumulatedText() { return accumulatedText.toString(); }
 
-        /** Whether any tool call has been seen during this stream. */
+        void markReasoningItemCreated() { this.reasoningItemCreated = true; }
+        boolean isReasoningItemCreated() { return reasoningItemCreated; }
+        void markReasoningItemClosed() { this.reasoningItemClosed = true; }
+        boolean isReasoningItemClosed() { return reasoningItemClosed; }
+        void appendReasoning(String chunk) { accumulatedReasoning.append(chunk); }
+        String getAccumulatedReasoning() { return accumulatedReasoning.toString(); }
+
+        void registerToolCall(String id) {
+            activeToolCalls.add(id);
+            toolCallArguments.put(id, new StringBuilder());
+        }
+        boolean hasToolCall(String id) { return activeToolCalls.contains(id); }
         boolean hasAnyToolCall() { return !activeToolCalls.isEmpty(); }
+
+        void setToolCallName(String id, String name) { toolCallNames.put(id, name); }
+        String getToolCallName(String id) { return toolCallNames.get(id); }
+
+        void appendToolCallArguments(String id, String delta) {
+            StringBuilder sb = toolCallArguments.get(id);
+            if (sb != null) {
+                sb.append(delta);
+            }
+        }
+        String getToolCallArguments(String id) {
+            StringBuilder sb = toolCallArguments.get(id);
+            return sb != null ? sb.toString() : null;
+        }
     }
 }

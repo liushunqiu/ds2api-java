@@ -4,10 +4,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.http.client.MultipartBodyBuilder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.BodyInserters;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+
+import java.nio.charset.StandardCharsets;
 
 /**
  * File upload client for DeepSeek history context.
@@ -28,40 +33,47 @@ public class DeepSeekFileClient {
     }
 
     /**
-     * Upload history context as a file.
+     * Upload history context as a file using multipart/form-data.
      *
      * @param content      Full conversation history text
      * @param accountToken Bearer token for the account
      * @return Mono with the file reference ID from the upstream response
      */
     public Mono<String> uploadHistoryFile(String content, String accountToken) {
-        String payload;
-        try {
-            payload = mapper.writeValueAsString(java.util.Map.of(
-                "file_name", "DS2API_HISTORY.txt",
-                "content", content,
-                "purpose", "context"
-            ));
-        } catch (Exception e) {
-            return Mono.error(new RuntimeException("Failed to serialize upload payload", e));
-        }
+        ByteArrayResource fileResource = new ByteArrayResource(content.getBytes(StandardCharsets.UTF_8)) {
+            @Override
+            public String getFilename() {
+                return "DS2API_HISTORY.txt";
+            }
+        };
+
+        MultipartBodyBuilder builder = new MultipartBodyBuilder();
+        builder.part("file", fileResource)
+            .filename("DS2API_HISTORY.txt")
+            .contentType(org.springframework.http.MediaType.TEXT_PLAIN);
 
         return deepSeekWebClient.post()
-            .uri("/api/v1/files/upload")
+            .uri("/api/v0/file/upload_file")
             .header("Authorization", "Bearer " + accountToken)
-            .header("Content-Type", "application/json")
-            .bodyValue(payload)
+            .contentType(org.springframework.http.MediaType.MULTIPART_FORM_DATA)
+            .body(BodyInserters.fromMultipartData(builder.build()))
             .retrieve()
             .bodyToMono(JsonNode.class)
             .map(resp -> {
-                // Flexible parsing: try file_id, id, ref, data.file_id
-                String ref = resp.path("data").path("file_id").asText(null);
+                // Flexible parsing: try nested and flat formats
+                JsonNode data = resp.path("data");
+                JsonNode bizData = data.path("biz_data");
+                
+                String ref = bizData.path("id").asText(null);
+                if (ref == null) ref = bizData.path("file_id").asText(null);
+                if (ref == null) ref = data.path("file_id").asText(null);
+                if (ref == null) ref = data.path("id").asText(null);
                 if (ref == null) ref = resp.path("file_id").asText(null);
                 if (ref == null) ref = resp.path("id").asText(null);
-                if (ref == null) ref = resp.path("ref").asText(null);
-                if (ref == null) {
-                    throw new RuntimeException(
-                        "File upload response missing reference ID: " + resp);
+                
+                if (ref == null || ref.isBlank()) {
+                    log.error("[File] Upload response missing reference ID: {}", resp);
+                    throw new RuntimeException("File upload response missing reference ID");
                 }
                 log.info("[File] History context uploaded, ref={}", ref);
                 return ref;

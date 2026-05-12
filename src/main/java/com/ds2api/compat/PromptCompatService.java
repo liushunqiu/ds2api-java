@@ -5,6 +5,7 @@ import com.ds2api.config.Ds2Config;
 import com.ds2api.model.InternalRequest;
 import com.ds2api.model.InternalRequest.Message;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -29,24 +30,24 @@ public class PromptCompatService {
         + "If tools are provided, use strict DSML/XML format for tool calls.";
 
     private final ConfigLoaderService configLoader;
+    private final ObjectMapper mapper;
 
-    public PromptCompatService(ConfigLoaderService configLoader) {
+    public PromptCompatService(ConfigLoaderService configLoader, ObjectMapper mapper) {
         this.configLoader = configLoader;
+        this.mapper = mapper;
     }
 
     /**
      * Synchronous compat layer:
-     * 1. thinking_injection appended to latest user message
+     * 1. Thinking injection is DISABLED (aligned with Go reference - thinking_enabled is payload-level only)
      * 2. tools definitions converted to DSML prompt block injected into system prompt
      */
     public InternalRequest applyCompat(InternalRequest req) {
         Ds2Config config = configLoader.getConfig();
         List<Message> messages = new ArrayList<>(req.messages());
 
-        // 1. Thinking injection
-        if (config.getThinkingInjection().isEnabled()) {
-            messages = injectThinkingPrompt(messages, config);
-        }
+        // 1. Thinking injection: DISABLED (Go reference does not inject thinking prompts into messages)
+        // thinking_enabled is controlled at the payload level only
 
         // 2. Tool definitions -> DSML prompt (DeepSeek Web doesn't natively support OpenAI tools array)
         if (req.tools() != null && !req.tools().isNull() && req.tools().isArray()
@@ -75,22 +76,36 @@ public class PromptCompatService {
 
     private List<Message> injectToolDefinitions(List<Message> messages, JsonNode tools,
                                                  Ds2Config config) {
-        StringBuilder toolPrompt = new StringBuilder(
-            "\n\n[Available Tools Specification]\n<|DSML|tool_calls>\n");
+        StringBuilder toolSchemas = new StringBuilder();
+        List<String> toolNames = new ArrayList<>();
+
         for (JsonNode tool : tools) {
             JsonNode func = tool.path("function");
-            String name = func.path("name").asText("unknown");
-            String desc = func.path("description").asText("");
-            toolPrompt.append("<|DSML|invoke name=\"").append(name).append("\">\n");
-            if (!desc.isBlank()) {
-                toolPrompt.append("<!-- ").append(desc).append(" -->\n");
-            }
-            toolPrompt.append("</|DSML|invoke>\n");
-        }
-        toolPrompt.append("</|DSML|tool_calls>\n")
-                  .append("Please use the above DSML/XML format for tool calls.");
+            String name = func.path("name").asText("");
+            if (name.isBlank()) continue;
+            String desc = func.path("description").asText("No description available");
+            JsonNode params = func.path("parameters");
+            toolNames.add(name);
 
-        String toolBlock = toolPrompt.toString();
+            toolSchemas.append("Tool: ").append(name).append("\n");
+            toolSchemas.append("Description: ").append(desc).append("\n");
+            toolSchemas.append("Parameters: ");
+            if (!params.isMissingNode() && !params.isNull()) {
+                try {
+                    toolSchemas.append(mapper.writeValueAsString(params));
+                } catch (Exception e) {
+                    toolSchemas.append("{}");
+                }
+            } else {
+                toolSchemas.append("{}");
+            }
+            toolSchemas.append("\n\n");
+        }
+
+        String toolCallInstructions = buildToolCallInstructions(toolNames);
+        String toolBlock = "\n\nYou have access to these tools:\n\n"
+            + toolSchemas + "\n" + toolCallInstructions;
+
         boolean hasSystem = false;
         for (int i = 0; i < messages.size(); i++) {
             Message msg = messages.get(i);
@@ -103,7 +118,32 @@ public class PromptCompatService {
         if (!hasSystem) {
             messages.add(0, new Message("system", toolBlock));
         }
-        log.debug("[Compat] Tool definitions injected as DSML prompt block");
+        log.debug("[Compat] Tool definitions injected");
         return messages;
+    }
+
+    private String buildToolCallInstructions(List<String> toolNames) {
+        return """
+            TOOL CALL FORMAT — FOLLOW EXACTLY:
+
+            <|DSML|tool_calls>
+              <|DSML|invoke name="TOOL_NAME_HERE">
+                <|DSML|parameter name="PARAMETER_NAME"><![CDATA[PARAMETER_VALUE]]></|DSML|parameter>
+              </|DSML|invoke>
+            </|DSML|tool_calls>
+
+            RULES:
+            1) Use the <|DSML|tool_calls> wrapper format.
+            2) Put one or more <|DSML|invoke> entries under a single <|DSML|tool_calls> root.
+            3) Put the tool name in the invoke name attribute: <|DSML|invoke name="TOOL_NAME">.
+            4) All string values must use <![CDATA[...]]>, even short ones.
+            5) Every top-level argument must be a <|DSML|parameter name="ARG_NAME">...</|DSML|parameter> node.
+            6) Numbers, booleans, and null stay plain text.
+            7) Use only the parameter names in the tool schema. Do not invent fields.
+            8) Do NOT wrap XML in markdown fences.
+            9) If you call a tool, the first non-whitespace characters of that tool block must be exactly <|DSML|tool_calls>.
+
+            Remember: The ONLY valid way to use tools is the <|DSML|tool_calls>...</|DSML|tool_calls> block at the end of your response.
+            """;
     }
 }

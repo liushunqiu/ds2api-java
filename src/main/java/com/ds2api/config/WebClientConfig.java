@@ -28,8 +28,14 @@ public class WebClientConfig {
                 .baseUrl(properties.getUpstream().getBaseUrl())
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
                 .filter(new DeepSeekPowRetryFilter())
-                .defaultHeader("User-Agent",
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .defaultHeader("Host", "chat.deepseek.com")
+                .defaultHeader("Accept", "application/json")
+                .defaultHeader("Content-Type", "application/json")
+                .defaultHeader("accept-charset", "UTF-8")
+                .defaultHeader("User-Agent", "DeepSeek/2.0.4 Android/35")
+                .defaultHeader("x-client-platform", "android")
+                .defaultHeader("x-client-version", "2.0.4")
+                .defaultHeader("x-client-locale", "zh_CN")
                 .build();
     }
 }

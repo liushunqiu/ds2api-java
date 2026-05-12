@@ -13,14 +13,17 @@ public sealed interface InternalStreamEvent {
     /** Visible text token delta (may be empty string for no-op frames). */
     record TextDelta(String chunk) implements InternalStreamEvent {}
 
+    /** Thinking/reasoning token delta (for chain-of-thought display). */
+    record ThinkingDelta(String chunk) implements InternalStreamEvent {}
+
     /** Tool call started. */
-    record ToolCallStart(String callId, String name) implements InternalStreamEvent {}
+    record ToolCallStart(String callId, String name, int toolIndex) implements InternalStreamEvent {}
 
     /** Tool call arguments delta (incremental JSON fragment). */
-    record ToolCallDelta(String callId, String argumentsDelta) implements InternalStreamEvent {}
+    record ToolCallDelta(String callId, int toolIndex, String argumentsDelta) implements InternalStreamEvent {}
 
     /** Tool call completed. */
-    record ToolCallEnd(String callId) implements InternalStreamEvent {}
+    record ToolCallEnd(String callId, int toolIndex) implements InternalStreamEvent {}
 
     /** Generation stream finished. Reason: "stop", "length", "content_filter", etc. */
     record Finish(String reason) implements InternalStreamEvent {}

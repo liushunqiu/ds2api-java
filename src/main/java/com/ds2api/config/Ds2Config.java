@@ -1,8 +1,12 @@
 package com.ds2api.config;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.JsonDeserializer;
+import com.fasterxml.jackson.databind.DeserializationContext;
 import lombok.Data;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -51,10 +55,26 @@ public class Ds2Config {
     // --- inner config classes ---
 
     @Data
+    @JsonDeserialize(using = ApiKey.ApiKeyDeserializer.class)
     public static class ApiKey {
         @JsonProperty("key") private String key;
         @JsonProperty("name") private String name;
         @JsonProperty("remark") private String remark;
+
+        // 支持字符串反序列化
+        public static class ApiKeyDeserializer extends JsonDeserializer<ApiKey> {
+            @Override
+            public ApiKey deserialize(com.fasterxml.jackson.core.JsonParser p, DeserializationContext ctxt) 
+                    throws IOException, com.fasterxml.jackson.core.JsonProcessingException {
+                if (p.currentToken() == com.fasterxml.jackson.core.JsonToken.VALUE_STRING) {
+                    ApiKey ak = new ApiKey();
+                    ak.setKey(p.getText());
+                    return ak;
+                }
+                // 默认对象反序列化
+                return ctxt.readValue(p, ApiKey.class);
+            }
+        }
     }
 
     @Data
@@ -93,7 +113,7 @@ public class Ds2Config {
 
     @Data
     public static class ThinkingInjectionConfig {
-        @JsonProperty("enabled") private boolean enabled = true;
+        @JsonProperty("enabled") private boolean enabled = false;
         @JsonProperty("prompt") private String prompt = "";
     }
 
