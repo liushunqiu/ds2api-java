@@ -333,13 +333,11 @@ public class ChatRuntimeService {
                     }
                     return resp.bodyToFlux(String.class)
                         .doOnNext(raw -> {
-                            log.info("[{}] Raw upstream chunk: {}", requestId, raw);
                             log.debug("[{}] Calling extractAndCacheResponseMessageIdFromChunk with conversationId='{}', sessionId='{}'", requestId, conversationId, sessionId);
                             extractAndCacheResponseMessageIdFromChunk(raw, conversationId, sessionId, accountIdentifier);
                         })
                         .map(raw -> {
                             InternalStreamEvent event = parseUpstreamChunk(raw, thinkState);
-                            log.info("[{}] Parse upstream chunk result: {}", requestId, event);
                             return event;
                         })
                         .filter(event -> {
