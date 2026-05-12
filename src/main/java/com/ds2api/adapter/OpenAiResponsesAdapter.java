@@ -2,6 +2,7 @@ package com.ds2api.adapter;
 
 import com.ds2api.model.InternalRequest;
 import com.ds2api.model.InternalStreamEvent;
+import com.ds2api.tool.DsmlToolFormatter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -60,20 +61,50 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
             msgs.add(new InternalRequest.Message("user", input.asText()));
         } else if (input.isArray()) {
             for (JsonNode node : input) {
-                String role = node.path("role").asText("user");
-                String type = node.path("type").asText("message");
-                JsonNode contentNode = node.path("content");
-                if ("message".equals(type)) {
-                    if (contentNode.isTextual()) {
-                        msgs.add(new InternalRequest.Message(role, contentNode.asText()));
-                    } else if (contentNode.isArray()) {
-                        StringBuilder sb = new StringBuilder();
-                        for (JsonNode part : contentNode) {
-                            if ("input_text".equals(part.path("type").asText())) {
-                                sb.append(part.path("text").asText());
+                String role = node.path("role").asText("");
+                String type = node.path("type").asText("");
+
+                switch (type) {
+                    case "function_call", "tool_call" -> {
+                        String name = node.path("name").asText("");
+                        String args = node.path("arguments").asText("{}");
+                        String callId = node.path("call_id").asText(node.path("id").asText(""));
+                        if (name.isBlank()) continue;
+                        ObjectNode toolCall = mapper.createObjectNode();
+                        toolCall.put("id", callId);
+                        toolCall.put("type", "function");
+                        ObjectNode fn = toolCall.putObject("function");
+                        fn.put("name", name);
+                        fn.put("arguments", args);
+                        ArrayNode toolCallsArr = mapper.createArrayNode();
+                        toolCallsArr.add(toolCall);
+                        String dsml = DsmlToolFormatter.convertToolCallsToDSML(toolCallsArr, mapper);
+                        msgs.add(new InternalRequest.Message("assistant", dsml));
+                    }
+                    case "function_call_output", "tool_result" -> {
+                        String output = node.path("output").asText(node.path("content").asText(""));
+                        String callId = node.path("call_id").asText(node.path("tool_call_id").asText(""));
+                        msgs.add(new InternalRequest.Message("tool", output));
+                    }
+                    default -> {
+                        if ("message".equals(type) || type.isEmpty()) {
+                            String msgRole = role.isEmpty() ? "user" : role;
+                            JsonNode contentNode = node.path("content");
+                            if (contentNode.isTextual()) {
+                                msgs.add(new InternalRequest.Message(msgRole, contentNode.asText()));
+                            } else if (contentNode.isArray()) {
+                                StringBuilder sb = new StringBuilder();
+                                for (JsonNode part : contentNode) {
+                                    String partType = part.path("type").asText("");
+                                    if ("input_text".equals(partType) || "output_text".equals(partType)) {
+                                        sb.append(part.path("text").asText());
+                                    }
+                                }
+                                if (!sb.isEmpty()) {
+                                    msgs.add(new InternalRequest.Message(msgRole, sb.toString()));
+                                }
                             }
                         }
-                        msgs.add(new InternalRequest.Message(role, sb.toString()));
                     }
                 }
             }

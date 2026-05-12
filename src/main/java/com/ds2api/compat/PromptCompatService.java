@@ -123,6 +123,7 @@ public class PromptCompatService {
     }
 
     private String buildToolCallInstructions(List<String> toolNames) {
+        String examples = buildToolExamples(toolNames);
         return """
             TOOL CALL FORMAT — FOLLOW EXACTLY:
 
@@ -136,14 +137,116 @@ public class PromptCompatService {
             1) Use the <|DSML|tool_calls> wrapper format.
             2) Put one or more <|DSML|invoke> entries under a single <|DSML|tool_calls> root.
             3) Put the tool name in the invoke name attribute: <|DSML|invoke name="TOOL_NAME">.
-            4) All string values must use <![CDATA[...]]>, even short ones.
+            4) All string values must use <![CDATA[...]]>, even short ones. This includes code, scripts, file contents, prompts, paths, names, and queries.
             5) Every top-level argument must be a <|DSML|parameter name="ARG_NAME">...</|DSML|parameter> node.
-            6) Numbers, booleans, and null stay plain text.
-            7) Use only the parameter names in the tool schema. Do not invent fields.
-            8) Do NOT wrap XML in markdown fences.
-            9) If you call a tool, the first non-whitespace characters of that tool block must be exactly <|DSML|tool_calls>.
+            6) Objects use nested XML elements inside the parameter body. Arrays may repeat <item> children.
+            7) Numbers, booleans, and null stay plain text.
+            8) Use only the parameter names in the tool schema. Do not invent fields.
+            9) Do NOT wrap XML in markdown fences. Do NOT output explanations, role markers, or internal monologue.
+            10) If you call a tool, the first non-whitespace characters of that tool block must be exactly <|DSML|tool_calls>.
+            11) Never omit the opening <|DSML|tool_calls> tag, even if you already plan to close with </|DSML|tool_calls>.
+            12) Compatibility note: the runtime also accepts the legacy XML tags <tool_calls> / <invoke> / <parameter>, but prefer the DSML-prefixed form above.
+
+            PARAMETER SHAPES:
+            - string => <|DSML|parameter name="x"><![CDATA[value]]></|DSML|parameter>
+            - object => <|DSML|parameter name="x"><field>...</field></|DSML|parameter>
+            - array => <|DSML|parameter name="x"><item>...</item><item>...</item></|DSML|parameter>
+            - number/bool/null => <|DSML|parameter name="x">plain_text</|DSML|parameter>
+
+            【WRONG — Do NOT do these】:
+
+            Wrong 1 — mixed text after XML:
+              <|DSML|tool_calls>...</|DSML|tool_calls> I hope this helps.
+            Wrong 2 — Markdown code fences:
+              ```xml
+              <|DSML|tool_calls>...</|DSML|tool_calls>
+              ```
+            Wrong 3 — missing opening wrapper:
+              <|DSML|invoke name="TOOL_NAME">...</|DSML|invoke>
+              </|DSML|tool_calls>
 
             Remember: The ONLY valid way to use tools is the <|DSML|tool_calls>...</|DSML|tool_calls> block at the end of your response.
-            """;
+
+            """ + examples;
+    }
+
+    private String buildToolExamples(List<String> toolNames) {
+        List<String> examples = new ArrayList<>();
+
+        // Find a basic single-tool example
+        String basicExample = findBasicExample(toolNames);
+        if (basicExample != null) {
+            examples.add("Example A — Single tool:\n" + basicExample);
+        }
+
+        // Find a parallel two-tool example
+        List<String> parallelExamples = findParallelExamples(toolNames, 2);
+        if (parallelExamples.size() >= 2) {
+            examples.add("Example B — Two tools in parallel:\n" +
+                "<|DSML|tool_calls>\n" +
+                String.join("\n", parallelExamples) + "\n" +
+                "</|DSML|tool_calls>");
+        }
+
+        if (examples.isEmpty()) {
+            return "";
+        }
+        return "【CORRECT EXAMPLES】:\n\n" + String.join("\n\n", examples) + "\n\n";
+    }
+
+    private String findBasicExample(List<String> toolNames) {
+        for (String name : toolNames) {
+            String params = getExampleParams(name);
+            if (params != null) {
+                return "<|DSML|tool_calls>\n" + params + "\n</|DSML|tool_calls>";
+            }
+        }
+        return null;
+    }
+
+    private List<String> findParallelExamples(List<String> toolNames, int count) {
+        List<String> results = new ArrayList<>();
+        for (String name : toolNames) {
+            String params = getExampleParams(name);
+            if (params != null) {
+                results.add(params);
+                if (results.size() >= count) break;
+            }
+        }
+        return results;
+    }
+
+    private String getExampleParams(String name) {
+        return switch (name) {
+            case "Bash", "execute_command", "exec_command" ->
+                "  <|DSML|invoke name=\"" + name + "\">\n" +
+                "    <|DSML|parameter name=\"command\"><![CDATA[pwd]]></|DSML|parameter>\n" +
+                "  </|DSML|invoke>";
+            case "Read", "read_file" ->
+                "  <|DSML|invoke name=\"" + name + "\">\n" +
+                "    <|DSML|parameter name=\"file_path\"><![CDATA[README.md]]></|DSML|parameter>\n" +
+                "  </|DSML|invoke>";
+            case "Glob", "list_files" ->
+                "  <|DSML|invoke name=\"" + name + "\">\n" +
+                "    <|DSML|parameter name=\"pattern\"><![CDATA[**/*.go]]></|DSML|parameter>\n" +
+                "    <|DSML|parameter name=\"path\"><![CDATA[.]]></|DSML|parameter>\n" +
+                "  </|DSML|invoke>";
+            case "search_files" ->
+                "  <|DSML|invoke name=\"" + name + "\">\n" +
+                "    <|DSML|parameter name=\"query\"><![CDATA[tool call parser]]></|DSML|parameter>\n" +
+                "  </|DSML|invoke>";
+            case "Write", "write_to_file" ->
+                "  <|DSML|invoke name=\"" + name + "\">\n" +
+                "    <|DSML|parameter name=\"file_path\"><![CDATA[notes.txt]]></|DSML|parameter>\n" +
+                "    <|DSML|parameter name=\"content\"><![CDATA[Hello world]]></|DSML|parameter>\n" +
+                "  </|DSML|invoke>";
+            case "Edit" ->
+                "  <|DSML|invoke name=\"" + name + "\">\n" +
+                "    <|DSML|parameter name=\"file_path\"><![CDATA[README.md]]></|DSML|parameter>\n" +
+                "    <|DSML|parameter name=\"old_string\"><![CDATA[foo]]></|DSML|parameter>\n" +
+                "    <|DSML|parameter name=\"new_string\"><![CDATA[bar]]></|DSML|parameter>\n" +
+                "  </|DSML|invoke>";
+            default -> null;
+        };
     }
 }

@@ -2,6 +2,7 @@ package com.ds2api.adapter;
 
 import com.ds2api.model.InternalRequest;
 import com.ds2api.model.InternalStreamEvent;
+import com.ds2api.tool.DsmlToolFormatter;
 import com.ds2api.usage.UsageCalculator;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -75,7 +76,7 @@ public class OpenAiChatAdapter implements ProtocolAdapter {
                 JsonNode toolCallsNode = msg.path("tool_calls");
                 if (toolCallsNode.isArray() && toolCallsNode.size() > 0) {
                     // Convert OpenAI tool_calls format to DSML format
-                    String dsmlToolCalls = convertToolCallsToDSML(toolCallsNode);
+                    String dsmlToolCalls = DsmlToolFormatter.convertToolCallsToDSML(toolCallsNode, mapper);
                     // If content is null/empty, use tool_calls as content
                     if (content == null || content.isBlank()) {
                         content = dsmlToolCalls;
@@ -95,43 +96,6 @@ public class OpenAiChatAdapter implements ProtocolAdapter {
         return Mono.just(new InternalRequest(model, messages, stream, tools, toolChoice, conversationId, passThrough));
     }
     
-    /**
-     * Convert OpenAI tool_calls format to DSML format for DeepSeek.
-     */
-    private String convertToolCallsToDSML(JsonNode toolCallsNode) {
-        StringBuilder dsml = new StringBuilder();
-        dsml.append("<|DSML|tool_calls>");
-        for (JsonNode tc : toolCallsNode) {
-            JsonNode func = tc.path("function");
-            String name = func.path("name").asText("");
-            String args = func.path("arguments").asText("{}");
-            dsml.append("<|DSML|invoke name=\"").append(name).append("\">");
-            
-            // Parse arguments JSON and convert to DSML parameters
-            try {
-                JsonNode argsNode = mapper.readTree(args);
-                if (argsNode.isObject()) {
-                    var fields = argsNode.fields();
-                    while (fields.hasNext()) {
-                        var entry = fields.next();
-                        String paramName = entry.getKey();
-                        String paramValue = entry.getValue().asText();
-                        dsml.append("<|DSML|parameter name=\"").append(paramName).append("\">");
-                        dsml.append("<![CDATA[").append(paramValue).append("]]>");
-                        dsml.append("</|DSML|parameter>");
-                    }
-                }
-            } catch (Exception e) {
-                // If parsing fails, pass raw arguments as single parameter
-                dsml.append("<|DSML|parameter name=\"arguments\"><![CDATA[").append(args).append("]]></|DSML|parameter>");
-            }
-            
-            dsml.append("</|DSML|invoke>");
-        }
-        dsml.append("</|DSML|tool_calls>");
-        return dsml.toString();
-    }
-
     @Override
     public Flux<ServerSentEvent<String>> toSse(Flux<InternalStreamEvent> events,
                                                 InternalRequest request,
