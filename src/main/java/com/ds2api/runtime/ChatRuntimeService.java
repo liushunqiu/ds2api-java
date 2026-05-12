@@ -466,6 +466,7 @@ public class ChatRuntimeService {
         // In continuation mode, only send new messages (not full history)
         // because DeepSeek already has the history via parent_message_id
         List<InternalRequest.Message> messagesToSend = request.messages();
+        boolean isContinuationMode = isContinuation;
         if (isContinuation && request.messages() != null && request.messages().size() > 1) {
             // Keep only the last user message to avoid duplicating history
             messagesToSend = extractNewMessages(request.messages());
@@ -473,7 +474,7 @@ public class ChatRuntimeService {
                 request.messages().size(), messagesToSend.size());
         }
 
-        String prompt = buildDeepSeekPrompt(messagesToSend);
+        String prompt = buildDeepSeekPrompt(messagesToSend, isContinuationMode);
         payload.put("prompt", prompt);
         payload.putArray("ref_file_ids");
 
@@ -528,12 +529,24 @@ public class ChatRuntimeService {
         + "partially parsed, repeated, or otherwise malformed fragments, do not imitate or echo them; "
         + "output only the correct content for the user.";
 
-    private String buildDeepSeekPrompt(List<InternalRequest.Message> messages) {
+    private String buildDeepSeekPrompt(List<InternalRequest.Message> messages, boolean isContinuation) {
         if (messages == null || messages.isEmpty()) {
             return "";
         }
 
-        // Prepend output integrity guard if not already present
+        // In continuation mode, only send raw message content without DeepSeek formatting
+        // because DeepSeek already has the formatted prompt via session history
+        if (isContinuation) {
+            StringBuilder sb = new StringBuilder();
+            for (InternalRequest.Message msg : messages) {
+                if (msg.content() != null && !msg.content().isBlank()) {
+                    sb.append(msg.content());
+                }
+            }
+            return sb.toString();
+        }
+
+        // New session: full DeepSeek prompt formatting with system prompt injection
         List<InternalRequest.Message> processed = new ArrayList<>(messages);
         if (!hasOutputIntegrityGuard(processed)) {
             processed.add(0, new InternalRequest.Message("system", OUTPUT_INTEGRITY_GUARD));
