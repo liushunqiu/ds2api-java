@@ -241,22 +241,19 @@ public class ToolCallStreamParser {
     private String sanitizeXmlContent(String content) {
         if (content == null) return "";
         
-        // First, fix CDATA sections that contain ]]> by splitting them
-        String sanitized = content.replaceAll("]]>", "]]]]><![CDATA[>");
-        
-        // Then, escape unescaped < and & characters outside of XML tags and CDATA sections
-        // We'll use a state machine to track whether we're inside a tag or CDATA
+        // Use state machine to properly handle CDATA sections
+        // Don't pre-replace ]]> as it would break the CDATA end markers
         StringBuilder result = new StringBuilder();
         boolean inTag = false;
         boolean inCdata = false;
         int i = 0;
         
-        while (i < sanitized.length()) {
-            char c = sanitized.charAt(i);
+        while (i < content.length()) {
+            char c = content.charAt(i);
             
             // Check for CDATA start
-            if (!inTag && !inCdata && i + 8 < sanitized.length() && 
-                sanitized.substring(i, i + 9).equals("<![CDATA[")) {
+            if (!inTag && !inCdata && i + 8 < content.length() && 
+                content.substring(i, i + 9).equals("<![CDATA[")) {
                 inCdata = true;
                 result.append("<![CDATA[");
                 i += 9;
@@ -264,16 +261,24 @@ public class ToolCallStreamParser {
             }
             
             // Check for CDATA end
-            if (inCdata && i + 2 < sanitized.length() && 
-                sanitized.substring(i, i + 3).equals("]]>")) {
+            if (inCdata && i + 2 < content.length() && 
+                content.substring(i, i + 3).equals("]]>")) {
                 inCdata = false;
                 result.append("]]>");
                 i += 3;
                 continue;
             }
             
-            // If we're inside CDATA, don't escape anything
+            // If we're inside CDATA, check for nested ]]> and split if needed
             if (inCdata) {
+                // Check if we have ]]> inside CDATA (which would break XML)
+                if (c == ']' && i + 2 < content.length() && 
+                    content.charAt(i + 1) == ']' && content.charAt(i + 2) == '>') {
+                    // Split CDATA: end current, escape, start new
+                    result.append("]]]]><![CDATA[>");
+                    i += 3;
+                    continue;
+                }
                 result.append(c);
                 i++;
                 continue;
@@ -282,9 +287,9 @@ public class ToolCallStreamParser {
             // Check for tag start
             if (!inTag && c == '<') {
                 // Check if this looks like a valid XML tag
-                int tagEnd = sanitized.indexOf('>', i);
+                int tagEnd = content.indexOf('>', i);
                 if (tagEnd > i) {
-                    String tagContent = sanitized.substring(i + 1, tagEnd);
+                    String tagContent = content.substring(i + 1, tagEnd);
                     // Simple check: if it looks like a tag (contains letters, /, or !)
                     if (tagContent.matches("[a-zA-Z/!].*") || tagContent.startsWith("?")) {
                         inTag = true;
@@ -310,9 +315,9 @@ public class ToolCallStreamParser {
             // Escape & if not part of an entity
             if (c == '&' && !inTag) {
                 // Check if this is already an entity
-                int semicolon = sanitized.indexOf(';', i);
+                int semicolon = content.indexOf(';', i);
                 if (semicolon > i && semicolon - i < 10) {
-                    String entity = sanitized.substring(i + 1, semicolon);
+                    String entity = content.substring(i + 1, semicolon);
                     if (entity.matches("[a-zA-Z]+|#\\d+|#x[0-9a-fA-F]+")) {
                         // This is already an entity, keep as is
                         result.append(c);
