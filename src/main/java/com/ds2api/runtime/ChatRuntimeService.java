@@ -465,7 +465,17 @@ public class ChatRuntimeService {
             payload.put("model_type", modelAlias.getModelType(request.model()));
         }
 
-        String prompt = buildDeepSeekPrompt(request.messages());
+        // In continuation mode, only send new messages (not full history)
+        // because DeepSeek already has the history via parent_message_id
+        List<InternalRequest.Message> messagesToSend = request.messages();
+        if (isContinuation && request.messages() != null && request.messages().size() > 1) {
+            // Keep only the last user message to avoid duplicating history
+            messagesToSend = extractNewMessages(request.messages());
+            log.info("[buildUpstreamPayload] Continuation mode: reduced {} messages to {} new messages",
+                request.messages().size(), messagesToSend.size());
+        }
+
+        String prompt = buildDeepSeekPrompt(messagesToSend);
         payload.put("prompt", prompt);
         payload.putArray("ref_file_ids");
 
@@ -485,6 +495,34 @@ public class ChatRuntimeService {
         }
 
         return payload;
+    }
+
+    /**
+     * Extract only new messages for session continuation.
+     * When client sends full history, we only need the latest user message
+     * since DeepSeek already has the previous history via parent_message_id.
+     */
+    private List<InternalRequest.Message> extractNewMessages(List<InternalRequest.Message> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return List.of();
+        }
+
+        // Find the last user message index
+        int lastUserIdx = -1;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            if ("user".equals(messages.get(i).role())) {
+                lastUserIdx = i;
+                break;
+            }
+        }
+
+        if (lastUserIdx < 0) {
+            // No user message found, return last message only
+            return List.of(messages.get(messages.size() - 1));
+        }
+
+        // Return from the last user message onwards (includes any assistant messages after it)
+        return messages.subList(lastUserIdx, messages.size());
     }
 
     private static final String OUTPUT_INTEGRITY_GUARD =
