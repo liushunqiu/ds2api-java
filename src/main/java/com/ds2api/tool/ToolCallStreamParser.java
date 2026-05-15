@@ -123,20 +123,20 @@ public class ToolCallStreamParser {
     private boolean processCapturing(List<InternalStreamEvent> events) {
         String text = buffer.toString();
 
-        if (text.length() > MAX_CAPTURE_LEN) {
-            log.debug("[ToolCallStreamParser] Capture overflow, releasing as text");
-            events.add(new InternalStreamEvent.TextDelta(text));
-            buffer.setLength(0);
-            state = State.IDLE;
-            return true;
-        }
-
         Matcher tcEnd = TOOL_CALLS_END.matcher(text);
         if (tcEnd.find()) {
             String captured = text.substring(0, tcEnd.start());
             log.debug("[ToolCallStreamParser] Found </tool_calls>, parsing {} chars", captured.length());
             parseAndEmitToolCalls(captured, events);
             buffer.delete(0, tcEnd.end());
+            state = State.IDLE;
+            return true;
+        }
+
+        if (text.length() > MAX_CAPTURE_LEN) {
+            log.debug("[ToolCallStreamParser] Capture overflow, releasing as text");
+            events.add(new InternalStreamEvent.TextDelta(text));
+            buffer.setLength(0);
             state = State.IDLE;
             return true;
         }
@@ -196,8 +196,10 @@ public class ToolCallStreamParser {
      */
     private java.util.Map<String, Object> parseParametersAsStructured(String body) {
         java.util.Map<String, Object> result = new java.util.LinkedHashMap<>();
+        // Normalize DSML namespace tags to plain XML tags for parsing
+        String cleaned = body.replaceAll("<\\|DSML\\|", "<").replaceAll("</\\|DSML\\|", "</");
         // Sanitize body: escape special chars inside CDATA that break XML parsing
-        String sanitized = sanitizeXmlContent(body);
+        String sanitized = sanitizeXmlContent(cleaned);
         // Wrap in a root element for XML parsing
         String xml = "<root>" + sanitized + "</root>";
         try {
@@ -231,7 +233,64 @@ public class ToolCallStreamParser {
             fallback.putAll(parseParametersAsFlatMap(body));
             return fallback;
         }
+        
+        // Post-process: extract heredoc content for file writing tools
+        for (java.util.Map.Entry<String, Object> entry : result.entrySet()) {
+            if (entry.getValue() instanceof String str) {
+                entry.setValue(extractHeredocContent(str));
+            }
+        }
+        
         return result;
+    }
+    
+    /**
+     * Extract content from heredoc syntax if present.
+     * Converts "cat > file << 'EOF'\ncontent\nEOF" to just "content".
+     * Also handles "echo 'content' > file" patterns.
+     */
+    private String extractHeredocContent(String value) {
+        if (value == null || value.isEmpty()) return value;
+        
+        String trimmed = value.trim();
+        
+        // Pattern 1: cat > file << 'DELIMITER'\ncontent\nDELIMITER
+        java.util.regex.Pattern heredocPattern = java.util.regex.Pattern.compile(
+            "cat\\s+>\\s+[^\\s]+\\s+<<\\s*['\"]?(\\w+)['\"]?\\s*\\n([\\s\\S]*?)\\n\\1\\s*$",
+            java.util.regex.Pattern.MULTILINE
+        );
+        java.util.regex.Matcher matcher = heredocPattern.matcher(trimmed);
+        if (matcher.find()) {
+            String content = matcher.group(2);
+            log.info("[ToolCallStreamParser] Extracted heredoc content ({} chars)", content.length());
+            return content;
+        }
+        
+        // Pattern 2: echo 'content' > file or echo "content" > file
+        java.util.regex.Pattern echoPattern = java.util.regex.Pattern.compile(
+            "^echo\\s+['\"](.*)['\"]\\s*>\\s*\\S+$",
+            java.util.regex.Pattern.DOTALL
+        );
+        java.util.regex.Matcher echoMatcher = echoPattern.matcher(trimmed);
+        if (echoMatcher.find()) {
+            String content = echoMatcher.group(1);
+            log.info("[ToolCallStreamParser] Extracted echo content ({} chars)", content.length());
+            return content;
+        }
+        
+        // Pattern 3: printf 'content' > file
+        java.util.regex.Pattern printfPattern = java.util.regex.Pattern.compile(
+            "^printf\\s+['\"](.*)['\"]\\s*>\\s*\\S+$",
+            java.util.regex.Pattern.DOTALL
+        );
+        java.util.regex.Matcher printfMatcher = printfPattern.matcher(trimmed);
+        if (printfMatcher.find()) {
+            String content = printfMatcher.group(1);
+            log.info("[ToolCallStreamParser] Extracted printf content ({} chars)", content.length());
+            return content;
+        }
+        
+        return value;
     }
 
     /**
@@ -446,11 +505,13 @@ public class ToolCallStreamParser {
             Matcher paramEndMatcher = PARAM_END.matcher(body);
             if (paramEndMatcher.find(paramValueStart)) {
                 String value = stripCDATA(body.substring(paramValueStart, paramEndMatcher.start()));
-                params.put(paramName, value);
+                // Extract heredoc content if present
+                params.put(paramName, extractHeredocContent(value));
                 pos = paramEndMatcher.end();
             } else {
                 String value = stripCDATA(body.substring(paramValueStart));
-                params.put(paramName, value);
+                // Extract heredoc content if present
+                params.put(paramName, extractHeredocContent(value));
                 pos = body.length();
             }
         }

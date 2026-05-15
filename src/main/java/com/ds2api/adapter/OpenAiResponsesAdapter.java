@@ -670,6 +670,7 @@ public class OpenAiResponsesAdapter implements ProtocolAdapter {
                 map.putIfAbsent("save_file", name);
                 map.putIfAbsent("create_file", name);
                 map.putIfAbsent("write", name);
+                map.putIfAbsent("write_stdin", name);
             }
             if (lower.contains("edit") || lower.contains("patch") || lower.contains("modify") || lower.contains("update")) {
                 map.putIfAbsent("edit_file", name);
