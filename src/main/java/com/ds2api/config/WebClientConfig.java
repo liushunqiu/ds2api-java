@@ -32,7 +32,6 @@ public class WebClientConfig {
                 .defaultHeader("Accept", "*/*")
                 .defaultHeader("Accept-Language", "zh-CN,zh;q=0.9")
                 .defaultHeader("Content-Type", "application/json")
-                .defaultHeader("accept-charset", "UTF-8")
                 .defaultHeader("Origin", "https://chat.deepseek.com")
                 .defaultHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
                 .defaultHeader("x-app-version", "2.0.0")
@@ -40,6 +39,14 @@ public class WebClientConfig {
                 .defaultHeader("x-client-platform", "web")
                 .defaultHeader("x-client-timezone-offset", "28800")
                 .defaultHeader("x-client-version", "2.0.0")
+                .defaultHeader("sec-ch-ua", "\"Chromium\";v=\"148\", \"Google Chrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"")
+                .defaultHeader("sec-ch-ua-mobile", "?0")
+                .defaultHeader("sec-ch-ua-platform", "\"macOS\"")
+                .defaultHeader("sec-fetch-dest", "empty")
+                .defaultHeader("sec-fetch-mode", "cors")
+                .defaultHeader("sec-fetch-site", "same-origin")
+                .defaultHeader("priority", "u=1, i")
+                .defaultHeader("Referer", "https://chat.deepseek.com/")
                 .build();
     }
 }

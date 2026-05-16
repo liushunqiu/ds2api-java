@@ -214,7 +214,8 @@ public class ChatRuntimeService {
                         log.info("[{}] Session created/continued: sessionId={}, parentMessageId={}, isContinuation={}",
                             requestId, sessionId, parentMessageId, continueSession);
 
-                        return historySplitter.applySplit(compatReq, token)
+                        return historySplitter.applySplit(compatReq, token,
+                                resolveWebCookie(lease.accountIdentifier()))
                             .flatMapMany(splitReq -> {
                                 ObjectNode payload = buildUpstreamPayload(splitReq, sessionId, parentMessageId, continueSession);
                                 return callUpstreamWithToken(payload, token, lease, requestId, toolParser, sessionId, conversationId, lease.accountIdentifier())
@@ -307,7 +308,9 @@ public class ChatRuntimeService {
             token.length() > 8 ? token.substring(0, 8) : token);
 
         // Proactively get PoW token before sending completion request (aligned with Go reference)
-        return powClient.getPowToken(token)
+        String webCookie = resolveWebCookie(accountIdentifier);
+        String referer = "https://chat.deepseek.com/a/chat/s/" + sessionId;
+        return powClient.getPowToken(token, "/api/v0/chat/completion", referer, webCookie)
             .doOnNext(powToken -> log.info("[{}] PoW token acquired: {}...", requestId,
                 powToken.length() > 20 ? powToken.substring(0, 20) : powToken))
             .flatMapMany(powToken -> {
@@ -321,6 +324,12 @@ public class ChatRuntimeService {
                 .header("Authorization", "Bearer " + token)
                 .header("x-ds-pow-response", powToken)
                 .header("Content-Type", "application/json")
+                .header("Referer", referer)
+                .headers(headers -> {
+                    if (webCookie != null && !webCookie.isBlank()) {
+                        headers.set("Cookie", webCookie);
+                    }
+                })
                 .bodyValue(payload)
                 .exchangeToFlux(resp -> {
                     if (resp.statusCode().isError()) {
@@ -493,6 +502,7 @@ public class ChatRuntimeService {
         ModelAliasService.ModelConfig mc = modelAlias.getModelConfig(request.model());
         payload.put("thinking_enabled", mc.thinkingEnabled());
         payload.put("search_enabled", mc.searchEnabled());
+        payload.put("preempt", false);
 
         // Add pass-through parameters (temperature, top_p, max_tokens, etc.)
         if (request.passThrough() != null) {
@@ -506,6 +516,33 @@ public class ChatRuntimeService {
         }
 
         return payload;
+    }
+
+    private String resolveWebCookie(String accountIdentifier) {
+        if (accountIdentifier == null || accountIdentifier.isBlank()
+                || "DIRECT".equals(accountIdentifier)) {
+            return null;
+        }
+        Ds2Config config = configLoader.getConfig();
+        if (config.getAccounts() == null) {
+            return null;
+        }
+        return config.getAccounts().stream()
+            .filter(account -> accountIdentifier.equals(resolveAccountIdentifier(account)))
+            .map(Ds2Config.Account::getWebCookie)
+            .filter(cookie -> cookie != null && !cookie.isBlank())
+            .findFirst()
+            .orElse(null);
+    }
+
+    private String resolveAccountIdentifier(Ds2Config.Account account) {
+        if (account.getEmail() != null && !account.getEmail().isBlank()) {
+            return account.getEmail();
+        }
+        if (account.getMobile() != null && !account.getMobile().isBlank()) {
+            return account.getMobile();
+        }
+        return null;
     }
 
     /**

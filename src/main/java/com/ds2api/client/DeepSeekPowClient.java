@@ -51,12 +51,27 @@ public class DeepSeekPowClient {
      * @return the x-ds-pow-response header value
      */
     public Mono<String> getPowToken(String accountToken, String targetPath) {
+        return getPowToken(accountToken, targetPath, defaultReferer(targetPath), null);
+    }
+
+    /**
+     * Get PoW token with Web-aligned Referer and optional browser Cookie.
+     */
+    public Mono<String> getPowToken(String accountToken, String targetPath,
+                                    String referer, String webCookie) {
         ObjectNode payload = mapper.createObjectNode();
         payload.put("target_path", targetPath);
 
-        return deepSeekWebClient.post()
+        WebClient.RequestBodySpec request = deepSeekWebClient.post()
             .uri("/api/v0/chat/create_pow_challenge")
             .header("Authorization", "Bearer " + accountToken)
+            .header("Referer", referer != null && !referer.isBlank()
+                ? referer : defaultReferer(targetPath));
+        if (webCookie != null && !webCookie.isBlank()) {
+            request.header("Cookie", webCookie);
+        }
+
+        return request
             .bodyValue(payload)
             .retrieve()
             .bodyToMono(String.class)
@@ -113,5 +128,12 @@ public class DeepSeekPowClient {
                 log.error("[PoW] Request failed: {}", e.getMessage());
                 return Mono.error(new PowException("PoW request failed: " + e.getMessage()));
             });
+    }
+
+    private String defaultReferer(String targetPath) {
+        if ("/api/v0/file/upload_file".equals(targetPath)) {
+            return "https://chat.deepseek.com/";
+        }
+        return "https://chat.deepseek.com/";
     }
 }

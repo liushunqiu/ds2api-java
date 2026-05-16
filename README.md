@@ -125,12 +125,13 @@ docker compose logs -f
       "mobile": "13800138000",
       "password": "your_password",
       "area_code": "+86",
-      "web_cookie": "HWWAFSESTIME=...; HWWAFSESID=...; smidV2=...; ds_session_id=...; .thumbcache_6b2e5483f9d858d7c661c5e276b6a6ae=...",
-      "device_id": "B...",
-      "device_profile": {
-        "ep": "...",
-        "data": "..."
-      }
+      "device_id": "B..."
+    },
+    {
+      "mobile": "13900139000",
+      "password": "your_password",
+      "area_code": "+86",
+      "device_id": "B..."
     }
   ],
   "model_aliases": {},
@@ -157,12 +158,20 @@ docker compose logs -f
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `keys` | string[] | API 鉴权 key 列表，客户端请求时通过 `Authorization: Bearer <key>` 传入 |
-| `accounts` | object[] | DeepSeek 登录账号，支持 `mobile` 或 `email` + `password`；可配置 `web_cookie` 复用真实浏览器 Cookie，显式配置 `device_id`，或配置 `device_profile.ep/data` 调用数美接口获取 deviceId |
+| `accounts` | object[] | DeepSeek 登录账号，支持 `mobile` 或 `email` + `password`；推荐配置共享 `device_id`，可选配置 `web_cookie` 或 `device_profile.ep/data` 增强 Web 指纹对齐 |
 | `model_aliases` | object | 模型别名映射，例如 `{"gpt-4": "deepseek-chat"}` |
 | `runtime.account_max_inflight` | int | 单个账号最大并发请求数 |
 | `runtime.auto_refresh_token` | bool | 是否自动刷新过期 Token |
 | `admin_key` | string | 管理后台鉴权密码 |
 | `dev.packet_capture` | bool | 开启请求/响应抓包调试 |
+
+账号配置优先级：
+
+1. 显式 `device_id`：推荐方式，可多个账号复用同一个值，必须带 `B` 前缀。
+2. `web_cookie`：可选，服务会从 `.thumbcache_*` 派生 `device_id`，并在 completion 请求中透传 Cookie。
+3. `device_profile.ep/data`：可选，服务会调用数美 `deviceprofile/v4` 获取 `detail.deviceId`，再拼成 `B<deviceId>`。
+
+如果只想降低配置成本，多个账号配置同一个 `device_id` 即可，不需要填写 `web_cookie`。
 
 > **安全提示：** `config.json` 包含敏感凭据，务必加入 `.gitignore`，不要提交到 Git 仓库。
 

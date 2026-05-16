@@ -26,10 +26,17 @@ public class DeepSeekFileClient {
 
     private final WebClient deepSeekWebClient;
     private final ObjectMapper mapper;
+    private final DeepSeekPowClient powClient;
 
-    public DeepSeekFileClient(WebClient deepSeekWebClient, ObjectMapper mapper) {
+    public DeepSeekFileClient(WebClient deepSeekWebClient, ObjectMapper mapper,
+                              DeepSeekPowClient powClient) {
         this.deepSeekWebClient = deepSeekWebClient;
         this.mapper = mapper;
+        this.powClient = powClient;
+    }
+
+    public DeepSeekFileClient(WebClient deepSeekWebClient, ObjectMapper mapper) {
+        this(deepSeekWebClient, mapper, new DeepSeekPowClient(deepSeekWebClient, mapper));
     }
 
     /**
@@ -40,6 +47,10 @@ public class DeepSeekFileClient {
      * @return Mono with the file reference ID from the upstream response
      */
     public Mono<String> uploadHistoryFile(String content, String accountToken) {
+        return uploadHistoryFile(content, accountToken, null);
+    }
+
+    public Mono<String> uploadHistoryFile(String content, String accountToken, String webCookie) {
         ByteArrayResource fileResource = new ByteArrayResource(content.getBytes(StandardCharsets.UTF_8)) {
             @Override
             public String getFilename() {
@@ -52,13 +63,23 @@ public class DeepSeekFileClient {
             .filename("DS2API_HISTORY.txt")
             .contentType(org.springframework.http.MediaType.TEXT_PLAIN);
 
-        return deepSeekWebClient.post()
-            .uri("/api/v0/file/upload_file")
-            .header("Authorization", "Bearer " + accountToken)
-            .contentType(org.springframework.http.MediaType.MULTIPART_FORM_DATA)
-            .body(BodyInserters.fromMultipartData(builder.build()))
-            .retrieve()
-            .bodyToMono(JsonNode.class)
+        return powClient.getPowToken(accountToken, "/api/v0/file/upload_file",
+                "https://chat.deepseek.com/", webCookie)
+            .flatMap(powToken -> {
+                WebClient.RequestBodySpec request = deepSeekWebClient.post()
+                    .uri("/api/v0/file/upload_file")
+                    .header("Authorization", "Bearer " + accountToken)
+                    .header("x-ds-pow-response", powToken)
+                    .header("Referer", "https://chat.deepseek.com/")
+                    .contentType(org.springframework.http.MediaType.MULTIPART_FORM_DATA);
+                if (webCookie != null && !webCookie.isBlank()) {
+                    request.header("Cookie", webCookie);
+                }
+                return request
+                    .body(BodyInserters.fromMultipartData(builder.build()))
+                    .retrieve()
+                    .bodyToMono(JsonNode.class);
+            })
             .map(resp -> {
                 // Flexible parsing: try nested and flat formats
                 JsonNode data = resp.path("data");

@@ -36,7 +36,6 @@ public class DeepSeekSessionClient {
      */
     public Mono<String> createSession(String accountToken) {
         ObjectNode payload = mapper.createObjectNode();
-        payload.put("agent", "chat");
 
         return deepSeekWebClient.post()
             .uri("/api/v0/chat_session/create")

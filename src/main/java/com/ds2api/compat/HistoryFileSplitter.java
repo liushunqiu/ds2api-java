@@ -44,11 +44,15 @@ public class HistoryFileSplitter {
      * @return Mono with potentially transformed request
      */
     public Mono<InternalRequest> applySplit(InternalRequest req, String accountToken) {
+        return applySplit(req, accountToken, null);
+    }
+
+    public Mono<InternalRequest> applySplit(InternalRequest req, String accountToken, String webCookie) {
         // Disabled: file upload on every request is not needed
         return Mono.just(req);
     }
 
-    private Mono<InternalRequest> splitAndUpload(InternalRequest req, String accountToken) {
+    private Mono<InternalRequest> splitAndUpload(InternalRequest req, String accountToken, String webCookie) {
         List<Message> msgs = req.messages();
         // All except the last message become history
         List<Message> history = msgs.subList(0, msgs.size() - 1);
@@ -61,7 +65,7 @@ public class HistoryFileSplitter {
                        .append("\n\n");
         }
 
-        return fileClient.uploadHistoryFile(historyText.toString(), accountToken)
+        return fileClient.uploadHistoryFile(historyText.toString(), accountToken, webCookie)
             .map(fileRef -> {
                 List<Message> newMsgs = new ArrayList<>();
                 newMsgs.add(new Message("user",
