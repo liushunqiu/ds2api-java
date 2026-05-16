@@ -152,7 +152,9 @@ public class AccountPoolManager {
                 .map(acc -> {
                     if (acc.getToken() == null || acc.getToken().isBlank()) {
                         log.info("[Pool] Token missing for {}, attempting login...", accountId);
-                        return authClient.login(acc.getEmail(), acc.getMobile(), acc.getPassword(), "86")
+                        return authClient.login(acc.getEmail(), acc.getMobile(), acc.getPassword(),
+                                        acc.getAreaCode(), acc.getDeviceId(), acc.getWebCookie(),
+                                        acc.getDeviceProfile())
                                 .doOnNext(token -> {
                                     acc.setToken(token);
                                     log.info("[Pool] Login successful for {}", accountId);

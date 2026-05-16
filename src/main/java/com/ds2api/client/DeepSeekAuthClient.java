@@ -1,5 +1,6 @@
 package com.ds2api.client;
 
+import com.ds2api.config.Ds2Config;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -10,6 +11,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Dedicated DeepSeek authentication client.
@@ -26,6 +30,7 @@ public class DeepSeekAuthClient {
     private static final Logger log = LoggerFactory.getLogger(DeepSeekAuthClient.class);
 
     private final WebClient authWebClient;
+    private final WebClient deviceProfileWebClient;
     private final ObjectMapper mapper;
 
     public DeepSeekAuthClient(WebClient.Builder webClientBuilder, ObjectMapper mapper) {
@@ -33,13 +38,32 @@ public class DeepSeekAuthClient {
         this.authWebClient = webClientBuilder
                 .baseUrl("https://chat.deepseek.com")
                 .defaultHeader("Host", "chat.deepseek.com")
-                .defaultHeader("Accept", "application/json")
+                .defaultHeader("Accept", "*/*")
+                .defaultHeader("Accept-Language", "zh-CN,zh;q=0.9")
                 .defaultHeader("Content-Type", "application/json")
                 .defaultHeader("accept-charset", "UTF-8")
-                .defaultHeader("User-Agent", "DeepSeek/2.0.4 Android/35")
-                .defaultHeader("x-client-platform", "android")
-                .defaultHeader("x-client-version", "2.0.4")
+                .defaultHeader("Origin", "https://chat.deepseek.com")
+                .defaultHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
+                .defaultHeader("x-app-version", "2.0.0")
                 .defaultHeader("x-client-locale", "zh_CN")
+                .defaultHeader("x-client-platform", "web")
+                .defaultHeader("x-client-timezone-offset", "28800")
+                .defaultHeader("x-client-version", "2.0.0")
+                .build();
+        this.deviceProfileWebClient = webClientBuilder
+                .baseUrl("https://fp-it-acc.portal101.cn")
+                .defaultHeader("Accept", "*/*")
+                .defaultHeader("Accept-Language", "zh-CN,zh;q=0.9")
+                .defaultHeader("Content-Type", "application/json;charset=UTF-8")
+                .defaultHeader("Origin", "https://chat.deepseek.com")
+                .defaultHeader("Referer", "https://chat.deepseek.com/")
+                .defaultHeader("Sec-Fetch-Dest", "empty")
+                .defaultHeader("Sec-Fetch-Mode", "cors")
+                .defaultHeader("Sec-Fetch-Site", "cross-site")
+                .defaultHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
+                .defaultHeader("sec-ch-ua", "\"Chromium\";v=\"148\", \"Google Chrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"")
+                .defaultHeader("sec-ch-ua-mobile", "?0")
+                .defaultHeader("sec-ch-ua-platform", "\"macOS\"")
                 .build();
     }
 
@@ -51,28 +75,57 @@ public class DeepSeekAuthClient {
      * @param email     account email (may be null if mobile is used)
      * @param mobile    account mobile (may be null if email is used)
      * @param password  account password (required)
-     * @param areaCode  mobile area code, defaults to "86"
+     * @param areaCode  mobile area code, defaults to "+86"
      */
     public Mono<String> login(String email, String mobile, String password, String areaCode) {
+        return login(email, mobile, password, areaCode, null, null);
+    }
+
+    /**
+     * Login with optional browser fingerprint context captured from DeepSeek Web.
+     *
+     * @param deviceId  explicit DeepSeek Web device_id, preferred when present
+     * @param webCookie real browser Cookie header value, used for passthrough and
+     *                  deriving device_id from .thumbcache_* when deviceId is absent
+     */
+    public Mono<String> login(String email, String mobile, String password, String areaCode,
+                              String deviceId, String webCookie) {
+        return login(email, mobile, password, areaCode, deviceId, webCookie, null);
+    }
+
+    public Mono<String> login(String email, String mobile, String password, String areaCode,
+                              String deviceId, String webCookie,
+                              Ds2Config.DeviceProfilePayload deviceProfilePayload) {
         ObjectNode payload = mapper.createObjectNode();
         if (email != null && !email.isBlank()) {
             payload.put("email", email);
         } else if (mobile != null && !mobile.isBlank()) {
             payload.put("mobile", mobile);
-            payload.put("area_code", areaCode != null ? areaCode : "86");
+            payload.put("area_code", normalizeAreaCode(areaCode));
         } else {
             return Mono.error(new IllegalArgumentException(
-                    "Email or mobile must be provided for login"));
+                "Email or mobile must be provided for login"));
         }
         payload.put("password", password);
-        payload.put("device_id", "deepseek_to_api");
-        payload.put("os", "android");
+        payload.put("os", "web");
 
         log.debug("[DeepSeekAuth] Login attempt for {}",
                 email != null ? email : mobile);
 
-        return authWebClient.post()
+        return resolveDeviceId(deviceId, webCookie, deviceProfilePayload)
+                .flatMap(resolvedDeviceId -> sendLogin(payload, resolvedDeviceId, webCookie));
+    }
+
+    private Mono<String> sendLogin(ObjectNode payload, String resolvedDeviceId, String webCookie) {
+        payload.put("device_id", resolvedDeviceId);
+        WebClient.RequestBodySpec request = authWebClient.post()
                 .uri("/api/v0/users/login")
+                .header("Referer", "https://chat.deepseek.com/sign_in");
+        if (webCookie != null && !webCookie.isBlank()) {
+            request.header("Cookie", webCookie);
+        }
+
+        return request
                 .bodyValue(payload)
                 .retrieve()
                 .onStatus(HttpStatusCode::is4xxClientError, resp ->
@@ -98,6 +151,73 @@ public class DeepSeekAuthClient {
                 .bodyToMono(JsonNode.class)
                 .map(this::extractToken)
                 .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    private String normalizeAreaCode(String areaCode) {
+        if (areaCode == null || areaCode.isBlank()) {
+            return "+86";
+        }
+        String trimmed = areaCode.trim();
+        return trimmed.startsWith("+") ? trimmed : "+" + trimmed;
+    }
+
+    private Mono<String> resolveDeviceId(String explicitDeviceId, String webCookie,
+                                         Ds2Config.DeviceProfilePayload deviceProfilePayload) {
+        if (explicitDeviceId != null && !explicitDeviceId.isBlank()) {
+            return Mono.just(explicitDeviceId.trim());
+        }
+        String smid = extractThumbcacheValue(webCookie);
+        if (smid != null && !smid.isBlank()) {
+            return Mono.just("B" + smid);
+        }
+        if (deviceProfilePayload != null) {
+            return fetchDeviceId(deviceProfilePayload).map(deviceId -> "B" + deviceId);
+        }
+        return Mono.error(new IllegalArgumentException(
+                "DeepSeek Web device_id is required. Provide account.device_id, "
+                        + "account.web_cookie with .thumbcache_*, or account.device_profile"));
+    }
+
+    private String extractThumbcacheValue(String webCookie) {
+        if (webCookie == null || webCookie.isBlank()) {
+            return null;
+        }
+        String[] parts = webCookie.split(";");
+        for (String part : parts) {
+            String trimmed = part.trim();
+            int equals = trimmed.indexOf('=');
+            if (equals <= 0) {
+                continue;
+            }
+            String name = trimmed.substring(0, equals).trim();
+            if (name.startsWith(".thumbcache_")) {
+                String value = trimmed.substring(equals + 1).trim();
+                return URLDecoder.decode(value, StandardCharsets.UTF_8);
+            }
+        }
+        return null;
+    }
+
+    private Mono<String> fetchDeviceId(Ds2Config.DeviceProfilePayload deviceProfilePayload) {
+        if (deviceProfilePayload.getEp() == null || deviceProfilePayload.getEp().isBlank()
+                || deviceProfilePayload.getData() == null || deviceProfilePayload.getData().isBlank()) {
+            return Mono.error(new IllegalArgumentException(
+                    "account.device_profile requires non-empty ep and data"));
+        }
+        return deviceProfileWebClient.post()
+                .uri("/deviceprofile/v4")
+                .bodyValue(deviceProfilePayload)
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .map(resp -> {
+                    int code = resp.path("code").asInt(-1);
+                    String deviceId = resp.path("detail").path("deviceId").asText(null);
+                    if (code != 1100 || deviceId == null || deviceId.isBlank()) {
+                        throw new RuntimeException(
+                                "Device profile failed: code=" + code + " response=" + resp);
+                    }
+                    return deviceId;
+                });
     }
 
     /**

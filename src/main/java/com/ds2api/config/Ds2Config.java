@@ -83,9 +83,24 @@ public class Ds2Config {
         @JsonProperty("mobile") private String mobile;
         @JsonProperty("password") private String password;
         @JsonProperty("token") private String token;
+        @JsonProperty("area_code") private String areaCode;
+        @JsonProperty("device_id") private String deviceId;
+        @JsonProperty("web_cookie") private String webCookie;
+        @JsonProperty("device_profile") private DeviceProfilePayload deviceProfile;
         @JsonProperty("name") private String name;
         @JsonProperty("remark") private String remark;
         @JsonProperty("proxy") private String proxy;
+    }
+
+    @Data
+    public static class DeviceProfilePayload {
+        @JsonProperty("appId") private String appId = "default";
+        @JsonProperty("organization") private String organization = "P9usCUBauxft8eAmUXaZ";
+        @JsonProperty("ep") private String ep;
+        @JsonProperty("data") private String data;
+        @JsonProperty("os") private String os = "web";
+        @JsonProperty("encode") private int encode = 5;
+        @JsonProperty("compress") private int compress = 2;
     }
 
     @Data

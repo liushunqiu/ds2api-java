@@ -96,7 +96,9 @@ public class TokenRefreshService {
                     return acc;
                 })
                 .flatMap(acc -> authClient.login(
-                        acc.getEmail(), acc.getMobile(), acc.getPassword(), "86"))
+                        acc.getEmail(), acc.getMobile(), acc.getPassword(),
+                        acc.getAreaCode(), acc.getDeviceId(), acc.getWebCookie(),
+                        acc.getDeviceProfile()))
                 .flatMap(newToken -> {
                     updateInMemoryToken(accountIdentifier, newToken);
                     return persistToken(accountIdentifier, newToken);

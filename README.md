@@ -123,7 +123,14 @@ docker compose logs -f
   "accounts": [
     {
       "mobile": "13800138000",
-      "password": "your_password"
+      "password": "your_password",
+      "area_code": "+86",
+      "web_cookie": "HWWAFSESTIME=...; HWWAFSESID=...; smidV2=...; ds_session_id=...; .thumbcache_6b2e5483f9d858d7c661c5e276b6a6ae=...",
+      "device_id": "B...",
+      "device_profile": {
+        "ep": "...",
+        "data": "..."
+      }
     }
   ],
   "model_aliases": {},
@@ -150,7 +157,7 @@ docker compose logs -f
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `keys` | string[] | API 鉴权 key 列表，客户端请求时通过 `Authorization: Bearer <key>` 传入 |
-| `accounts` | object[] | DeepSeek 登录账号，支持 `mobile` 或 `email` + `password` |
+| `accounts` | object[] | DeepSeek 登录账号，支持 `mobile` 或 `email` + `password`；可配置 `web_cookie` 复用真实浏览器 Cookie，显式配置 `device_id`，或配置 `device_profile.ep/data` 调用数美接口获取 deviceId |
 | `model_aliases` | object | 模型别名映射，例如 `{"gpt-4": "deepseek-chat"}` |
 | `runtime.account_max_inflight` | int | 单个账号最大并发请求数 |
 | `runtime.auto_refresh_token` | bool | 是否自动刷新过期 Token |

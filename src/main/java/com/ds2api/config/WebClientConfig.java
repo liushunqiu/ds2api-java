@@ -29,13 +29,17 @@ public class WebClientConfig {
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
                 .filter(new DeepSeekPowRetryFilter())
                 .defaultHeader("Host", "chat.deepseek.com")
-                .defaultHeader("Accept", "application/json")
+                .defaultHeader("Accept", "*/*")
+                .defaultHeader("Accept-Language", "zh-CN,zh;q=0.9")
                 .defaultHeader("Content-Type", "application/json")
                 .defaultHeader("accept-charset", "UTF-8")
-                .defaultHeader("User-Agent", "DeepSeek/2.0.4 Android/35")
-                .defaultHeader("x-client-platform", "android")
-                .defaultHeader("x-client-version", "2.0.4")
+                .defaultHeader("Origin", "https://chat.deepseek.com")
+                .defaultHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36")
+                .defaultHeader("x-app-version", "2.0.0")
                 .defaultHeader("x-client-locale", "zh_CN")
+                .defaultHeader("x-client-platform", "web")
+                .defaultHeader("x-client-timezone-offset", "28800")
+                .defaultHeader("x-client-version", "2.0.0")
                 .build();
     }
 }
